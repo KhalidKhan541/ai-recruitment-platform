@@ -1,0 +1,71 @@
+import Link from "next/link";
+
+export default function AuthLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex min-h-screen">
+      {/* Left Side - Branding */}
+      <div className="hidden w-1/2 bg-gradient-to-br from-blue-600 via-purple-600 to-indigo-700 lg:flex lg:flex-col lg:justify-between lg:p-12">
+        <div>
+          <Link href="/" className="flex items-center gap-2">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-white/20">
+              <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+              </svg>
+            </div>
+            <span className="text-2xl font-bold text-white">TalentAI</span>
+          </Link>
+        </div>
+
+        <div className="space-y-8">
+          <h1 className="text-4xl font-bold leading-tight text-white">
+            The future of recruitment starts here
+          </h1>
+          <div className="space-y-4">
+            {[
+              "AI-powered candidate matching with 95% accuracy",
+              "Automated screening saves 10+ hours per hire",
+              "Real-time analytics and insights dashboard",
+              "Seamless team collaboration tools",
+            ].map((feature) => (
+              <div key={feature} className="flex items-center gap-3">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white/20">
+                  <svg className="h-4 w-4 text-white" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                  </svg>
+                </div>
+                <span className="text-sm text-blue-100">{feature}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="text-sm text-blue-200">
+          &copy; {new Date().getFullYear()} TalentAI. All rights reserved.
+        </div>
+      </div>
+
+      {/* Right Side - Auth Form */}
+      <div className="flex w-full flex-col justify-center px-6 py-12 lg:w-1/2 lg:px-12 xl:px-16">
+        <div className="mx-auto w-full max-w-md">
+          {/* Mobile Logo */}
+          <div className="mb-8 lg:hidden">
+            <Link href="/" className="flex items-center gap-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-purple-600">
+                <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
+                </svg>
+              </div>
+              <span className="text-xl font-bold text-foreground">TalentAI</span>
+            </Link>
+          </div>
+
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
