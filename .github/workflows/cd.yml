@@ -1,0 +1,172 @@
+name: CD
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Deployment environment"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  NODE_VERSION: "20"
+
+jobs:
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'staging'
+    environment:
+      name: staging
+      url: https://staging.recruitai.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+
+      - name: Build application
+        run: npm run build
+        env:
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
+          NEXTAUTH_SECRET: ${{ secrets.STAGING_NEXTAUTH_SECRET }}
+          NEXTAUTH_URL: https://staging.recruitai.com
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Deploy to Vercel (Staging)
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--pre"
+
+      - name: Run smoke tests
+        run: |
+          curl -f https://staging.recruitai.com/api/health
+          curl -f https://staging.recruitai.com
+
+      - name: Notify deployment
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Staging deployment successful: https://staging.recruitai.com"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment:
+      name: production
+      url: https://recruitai.com
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Run database migrations
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+
+      - name: Build application
+        run: npm run build
+        env:
+          DATABASE_URL: ${{ secrets.PRODUCTION_DATABASE_URL }}
+          NEXTAUTH_SECRET: ${{ secrets.PRODUCTION_NEXTAUTH_SECRET }}
+          NEXTAUTH_URL: https://recruitai.com
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Deploy to Vercel (Production)
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod"
+
+      - name: Run smoke tests
+        run: |
+          curl -f https://recruitai.com/api/health
+          curl -f https://recruitai.com
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Notify deployment
+        if: success()
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "Production deployment successful: https://recruitai.com (version ${{ github.ref_name }})"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  rollback:
+    name: Rollback
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: [deploy-production]
+    steps:
+      - name: Rollback Vercel deployment
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: "--prod --rollback"
+
+      - name: Notify rollback
+        uses: slackapi/slack-github-action@v1
+        with:
+          payload: |
+            {
+              "text": "WARNING: Production rollback initiated for https://recruitai.com"
+            }
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
