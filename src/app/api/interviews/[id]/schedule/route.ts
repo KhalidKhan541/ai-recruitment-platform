@@ -6,10 +6,9 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const scheduleSchema = z.object({
   scheduledAt: z.string().datetime(),
-  duration: z.number().min(15).max(480).optional(),
-  location: z.string().optional(),
-  meetingLink: z.string().url().optional().or(z.literal("")),
-  interviewerId: z.string().optional(),
+  durationMinutes: z.number().min(15).max(480).optional(),
+  location: z.string().optional().nullable(),
+  meetingUrl: z.string().url().optional().or(z.literal("")).nullable(),
   notes: z.string().optional(),
   sendInvite: z.boolean().default(true),
   reminderMinutes: z.number().min(5).max(1440).default(30),
@@ -28,8 +27,10 @@ export async function POST(
     const interview = await prisma.interview.findUnique({
       where: { id: params.id },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        application: { include: { job: { select: { id: true, title: true } } } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
+        jobPosting: { select: { id: true, title: true } },
       },
     });
 
@@ -37,7 +38,7 @@ export async function POST(
       return NextResponse.json({ error: "Interview not found" }, { status: 404 });
     }
 
-    if (interview.status === "completed") {
+    if (interview.status === "COMPLETED") {
       return NextResponse.json(
         { error: "Cannot reschedule a completed interview" },
         { status: 400 }
@@ -55,81 +56,40 @@ export async function POST(
       );
     }
 
-    const interviewerId = validated.interviewerId || interview.interviewerId || session.user.id;
-    const duration = validated.duration || interview.duration;
-
-    const conflicting = await prisma.interview.findFirst({
-      where: {
-        id: { not: params.id },
-        interviewerId,
-        status: { in: ["scheduled", "rescheduled"] },
-        scheduledAt: {
-          gte: new Date(scheduledDate.getTime() - duration * 60000),
-          lte: new Date(scheduledDate.getTime() + duration * 60000),
-        },
-      },
-    });
-
-    if (conflicting) {
-      return NextResponse.json(
-        { error: "Interviewer has a conflicting interview at this time" },
-        { status: 409 }
-      );
-    }
-
-    const previousStatus = interview.status;
-    const previousDate = interview.scheduledAt;
+    const duration = validated.durationMinutes || interview.durationMinutes;
 
     const updated = await prisma.interview.update({
       where: { id: params.id },
       data: {
         scheduledAt: scheduledDate,
-        duration,
-        location: validated.location || interview.location,
-        meetingLink: validated.meetingLink || interview.meetingLink,
-        interviewerId,
+        durationMinutes: duration,
+        location: validated.location !== undefined ? validated.location : interview.location,
+        meetingUrl: validated.meetingUrl !== undefined ? validated.meetingUrl : interview.meetingUrl,
         notes: validated.notes || interview.notes,
-        status: "scheduled",
+        status: interview.status === "RESCHEDULED" ? "RESCHEDULED" : "RESCHEDULED",
       },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        interviewer: { select: { id: true, name: true, email: true } },
-      },
-    });
-
-    await prisma.timelineEvent.create({
-      data: {
-        type: "interview_scheduled",
-        title: previousStatus === "scheduled" ? "Interview rescheduled" : "Interview scheduled",
-        description: `Interview with ${interview.candidate.name} scheduled for ${scheduledDate.toLocaleDateString()} at ${scheduledDate.toLocaleTimeString()}`,
-        metadata: {
-          interviewId: params.id,
-          previousDate: previousDate?.toISOString(),
-          newDate: scheduledDate.toISOString(),
-          rescheduledBy: session.user.id,
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
         },
-        applicationId: interview.applicationId,
+        jobPosting: { select: { id: true, title: true } },
       },
     });
 
     const calendarEvent = {
-      title: `${interview.application.job.title} - Interview with ${interview.candidate.name}`,
+      title: `${interview.jobPosting.title} - Interview with ${interview.candidate.user.name}`,
       start: scheduledDate.toISOString(),
       end: new Date(scheduledDate.getTime() + duration * 60000).toISOString(),
-      description: `Interview type: ${interview.type}\nCandidate: ${interview.candidate.name} (${interview.candidate.email})`,
+      description: `Interview type: ${interview.type}\nCandidate: ${interview.candidate.user.name}`,
       location: validated.location || interview.location || "Online",
-      meetingLink: validated.meetingLink || interview.meetingLink,
-      attendees: [
-        interview.candidate.email,
-        ...(updated.interviewer ? [updated.interviewer.email] : []),
-      ],
+      meetingLink: validated.meetingUrl || interview.meetingUrl,
       reminder: validated.reminderMinutes,
     };
 
     return NextResponse.json({
       data: updated,
       calendarEvent,
-      message: "Interview scheduled successfully",
+      message: "Interview rescheduled successfully",
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

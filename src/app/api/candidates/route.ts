@@ -8,47 +8,17 @@ const createCandidateSchema = z.object({
   email: z.string().email().toLowerCase().trim(),
   name: z.string().min(1).max(200).trim(),
   phone: z.string().optional(),
-  title: z.string().optional(),
-  location: z.string().optional(),
-  linkedIn: z.string().url().optional().or(z.literal("")),
-  portfolio: z.string().url().optional().or(z.literal("")),
-  skills: z
-    .array(
-      z.object({
-        name: z.string(),
-        level: z.enum(["beginner", "intermediate", "advanced", "expert"]).default("intermediate"),
-        yearsOfExperience: z.number().optional(),
-      })
-    )
-    .optional(),
-  education: z
-    .array(
-      z.object({
-        institution: z.string(),
-        degree: z.string(),
-        field: z.string(),
-        startDate: z.string(),
-        endDate: z.string().optional(),
-        gpa: z.number().optional(),
-      })
-    )
-    .optional(),
-  workHistory: z
-    .array(
-      z.object({
-        company: z.string(),
-        title: z.string(),
-        location: z.string().optional(),
-        startDate: z.string(),
-        endDate: z.string().optional(),
-        current: z.boolean().default(false),
-        description: z.string(),
-        achievements: z.array(z.string()).default([]),
-      })
-    )
-    .optional(),
-  resume: z.string().optional(),
-  talentPoolId: z.string().optional(),
+  headline: z.string().max(200).optional(),
+  summary: z.string().optional(),
+  linkedInUrl: z.string().url().optional().or(z.literal("")),
+  portfolioUrl: z.string().url().optional().or(z.literal("")),
+  githubUrl: z.string().url().optional().or(z.literal("")),
+  desiredSalary: z.number().optional(),
+  desiredSalaryCurrency: z.string().default("USD"),
+  willingToRelocate: z.boolean().default(false),
+  workPreference: z.string().optional(),
+  expectedExperienceLevel: z.string().optional(),
+  companyId: z.string().uuid().optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -62,37 +32,46 @@ export async function GET(request: NextRequest) {
     const page = parseInt(searchParams.get("page") || "1");
     const limit = Math.min(parseInt(searchParams.get("limit") || "20"), 100);
     const search = searchParams.get("search") || undefined;
-    const status = searchParams.get("status") || undefined;
-    const talentPoolId = searchParams.get("talentPoolId") || undefined;
+    const isAvailable = searchParams.get("isAvailable");
+    const companyId = searchParams.get("companyId") || undefined;
     const skill = searchParams.get("skill") || undefined;
-    const location = searchParams.get("location") || undefined;
     const sortBy = searchParams.get("sortBy") || "createdAt";
-    const sortOrder = searchParams.get("sortOrder") || "desc";
+    const sortOrder = (searchParams.get("sortOrder") || "desc") as "asc" | "desc";
 
     const where: any = {};
 
     if (search) {
       where.OR = [
-        { name: { contains: search, mode: "insensitive" } },
-        { email: { contains: search, mode: "insensitive" } },
-        { title: { contains: search, mode: "insensitive" } },
+        { user: { name: { contains: search, mode: "insensitive" } } },
+        { user: { email: { contains: search, mode: "insensitive" } } },
+        { headline: { contains: search, mode: "insensitive" } },
       ];
     }
 
-    if (status) where.status = status;
-    if (talentPoolId) where.talentPoolId = talentPoolId;
-    if (location) where.location = { contains: location, mode: "insensitive" };
+    if (isAvailable !== null && isAvailable !== undefined) {
+      where.isAvailable = isAvailable === "true";
+    }
+
+    if (companyId) where.companyId = companyId;
 
     if (skill) {
-      where.skills = { path: "$", string_contains: skill };
+      where.skills = { some: { name: { contains: skill, mode: "insensitive" } } };
     }
 
     const [candidates, total] = await Promise.all([
       prisma.candidate.findMany({
         where,
         include: {
-          talentPool: { select: { id: true, name: true } },
-          _count: { select: { applications: true, interviews: true } },
+          user: { select: { id: true, name: true, email: true, avatarUrl: true } },
+          company: { select: { id: true, name: true } },
+          skills: true,
+          _count: {
+            select: {
+              applications: true,
+              interviews: true,
+              poolMemberships: true,
+            },
+          },
         },
         orderBy: { [sortBy]: sortOrder },
         skip: (page - 1) * limit,
@@ -124,32 +103,46 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const validated = createCandidateSchema.parse(body);
 
-    const existing = await prisma.candidate.findUnique({
+    const existingUser = await prisma.user.findUnique({
       where: { email: validated.email },
     });
 
-    if (existing) {
+    if (existingUser) {
       return NextResponse.json(
-        { error: "A candidate with this email already exists", candidateId: existing.id },
+        { error: "A user with this email already exists" },
         { status: 409 }
       );
     }
 
-    const candidate = await prisma.candidate.create({
+    const user = await prisma.user.create({
       data: {
         email: validated.email,
         name: validated.name,
         phone: validated.phone,
-        title: validated.title,
-        location: validated.location,
-        linkedIn: validated.linkedIn || null,
-        portfolio: validated.portfolio || null,
-        skills: validated.skills || [],
-        education: validated.education || [],
-        workHistory: validated.workHistory || [],
-        resume: validated.resume,
-        talentPoolId: validated.talentPoolId,
-        status: "new",
+        role: "CANDIDATE",
+        companyId: validated.companyId || session.user.companyId || null,
+      },
+    });
+
+    const candidate = await prisma.candidate.create({
+      data: {
+        userId: user.id,
+        headline: validated.headline,
+        summary: validated.summary,
+        linkedInUrl: validated.linkedInUrl || null,
+        portfolioUrl: validated.portfolioUrl || null,
+        githubUrl: validated.githubUrl || null,
+        desiredSalary: validated.desiredSalary,
+        desiredSalaryCurrency: validated.desiredSalaryCurrency,
+        willingToRelocate: validated.willingToRelocate,
+        workPreference: validated.workPreference,
+        expectedExperienceLevel: validated.expectedExperienceLevel,
+        companyId: validated.companyId || session.user.companyId || null,
+        profileCompleteness: 0,
+        isAvailable: true,
+      },
+      include: {
+        user: { select: { id: true, name: true, email: true } },
       },
     });
 

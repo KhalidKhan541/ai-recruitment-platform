@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockPrisma = {
-  application: {
+  jobApplication: {
     findMany: vi.fn(),
     findUnique: vi.fn(),
     create: vi.fn(),
@@ -10,7 +10,11 @@ const mockPrisma = {
     count: vi.fn(),
   },
   job: {
+    findUnique: vi.fn(),
     update: vi.fn(),
+  },
+  candidate: {
+    findUnique: vi.fn(),
   },
 };
 
@@ -25,150 +29,204 @@ describe("Applications API", () => {
   });
 
   describe("GET /api/applications", () => {
-    it("returns applications for a job", async () => {
-      const apps = [
-        { id: "a1", jobId: "j1", candidateId: "c1", status: "submitted" },
-        { id: "a2", jobId: "j1", candidateId: "c2", status: "reviewing" },
+    it("returns paginated applications", async () => {
+      const mockApplications = [
+        {
+          id: "app-1",
+          jobId: "job-1",
+          candidateId: "candidate-1",
+          status: "SUBMITTED",
+          createdAt: new Date(),
+        },
       ];
-      mockPrisma.application.findMany.mockResolvedValue(apps);
 
-      const result = await mockPrisma.application.findMany({
-        where: { jobId: "j1" },
-      });
+      mockPrisma.jobApplication.findMany.mockResolvedValue(mockApplications);
+      mockPrisma.jobApplication.count.mockResolvedValue(1);
 
-      expect(result).toHaveLength(2);
-    });
-
-    it("filters by status", async () => {
-      mockPrisma.application.findMany.mockResolvedValue([]);
-      await mockPrisma.application.findMany({
-        where: { status: "screening" },
-      });
-      expect(mockPrisma.application.findMany).toHaveBeenCalled();
-    });
-
-    it("supports pagination", async () => {
-      mockPrisma.application.findMany.mockResolvedValue([]);
-      await mockPrisma.application.findMany({
-        take: 10,
+      const applications = await mockPrisma.jobApplication.findMany({
+        take: 20,
         skip: 0,
+        orderBy: { createdAt: "desc" },
       });
-      expect(mockPrisma.application.findMany).toHaveBeenCalled();
+
+      expect(applications).toHaveLength(1);
+    });
+
+    it("filters by job status", async () => {
+      mockPrisma.jobApplication.findMany.mockResolvedValue([]);
+
+      await mockPrisma.jobApplication.findMany({
+        where: { status: "UNDER_REVIEW" },
+      });
+
+      expect(mockPrisma.jobApplication.findMany).toHaveBeenCalled();
+    });
+
+    it("filters by candidate", async () => {
+      mockPrisma.jobApplication.findMany.mockResolvedValue([]);
+
+      await mockPrisma.jobApplication.findMany({
+        where: { candidateId: "candidate-123" },
+      });
+
+      expect(mockPrisma.jobApplication.findMany).toHaveBeenCalled();
     });
   });
 
   describe("POST /api/applications", () => {
     it("creates a new application", async () => {
-      const app = {
-        id: "a3",
-        jobId: "j1",
-        candidateId: "c1",
-        status: "submitted",
+      const applicationData = {
+        jobId: "job-123",
+        candidateId: "candidate-123",
+        coverLetter: "I am excited about this opportunity",
+        status: "SUBMITTED",
       };
-      mockPrisma.application.create.mockResolvedValue(app);
 
-      const created = await mockPrisma.application.create({
-        data: {
-          jobId: "j1",
-          candidateId: "c1",
-          status: "submitted",
-        },
+      mockPrisma.jobApplication.create.mockResolvedValue({
+        id: "app-123",
+        ...applicationData,
+        createdAt: new Date(),
       });
 
-      expect(created.status).toBe("submitted");
+      const created = await mockPrisma.jobApplication.create({
+        data: applicationData,
+      });
+
+      expect(created.status).toBe("SUBMITTED");
+      expect(created.jobId).toBe("job-123");
     });
 
     it("prevents duplicate applications", async () => {
-      mockPrisma.application.findUnique.mockResolvedValue({
-        id: "existing",
-        jobId: "j1",
-        candidateId: "c1",
+      mockPrisma.jobApplication.findUnique.mockResolvedValue({
+        id: "existing-app",
+        jobId: "job-123",
+        candidateId: "candidate-123",
       });
 
-      const existing = await mockPrisma.application.findUnique({
+      const existing = await mockPrisma.jobApplication.findUnique({
         where: {
-          jobId_candidateId: { jobId: "j1", candidateId: "c1" },
+          jobId_candidateId: {
+            jobId: "job-123",
+            candidateId: "candidate-123",
+          },
         },
       });
 
       expect(existing).not.toBeNull();
     });
 
-    it("increments application count on job", async () => {
-      mockPrisma.application.create.mockResolvedValue({});
-      mockPrisma.job.update.mockResolvedValue({});
+    it("validates screening answers", () => {
+      const screeningQuestions = [
+        { id: "q1", question: "Years of experience?", required: true },
+        { id: "q2", question: "Willing to relocate?", required: true },
+      ];
 
-      await mockPrisma.application.create({
-        data: { jobId: "j1", candidateId: "c1", status: "submitted" },
-      });
+      const answers = [
+        { questionId: "q1", answer: "5" },
+        { questionId: "q2", answer: "Yes" },
+      ];
 
-      await mockPrisma.job.update({
-        where: { id: "j1" },
-        data: { applicationCount: { increment: 1 } },
-      });
+      const requiredIds = screeningQuestions
+        .filter((q) => q.required)
+        .map((q) => q.id);
+      const answeredIds = answers.map((a) => a.questionId);
 
-      expect(mockPrisma.job.update).toHaveBeenCalled();
+      const allRequiredAnswered = requiredIds.every((id) =>
+        answeredIds.includes(id)
+      );
+
+      expect(allRequiredAnswered).toBe(true);
     });
   });
 
   describe("PUT /api/applications/:id", () => {
     it("updates application status", async () => {
-      mockPrisma.application.update.mockResolvedValue({
-        id: "a1",
-        status: "phone_screen",
+      mockPrisma.jobApplication.update.mockResolvedValue({
+        id: "app-123",
+        status: "UNDER_REVIEW",
       });
 
-      const result = await mockPrisma.application.update({
-        where: { id: "a1" },
-        data: { status: "phone_screen" },
+      const result = await mockPrisma.jobApplication.update({
+        where: { id: "app-123" },
+        data: { status: "UNDER_REVIEW" },
       });
 
-      expect(result.status).toBe("phone_screen");
+      expect(result.status).toBe("UNDER_REVIEW");
     });
 
-    it("supports all status transitions", () => {
-      const validTransitions: Record<string, string[]> = {
-        submitted: ["screening", "rejected", "withdrawn"],
-        screening: ["review", "rejected"],
-        review: ["phone_interview", "rejected"],
-        phone_interview: ["technical_interview", "rejected"],
-        technical_interview: ["final_interview", "rejected"],
-        final_interview: ["offer_pending", "rejected"],
-        offer_pending: ["offer_extended"],
-        offer_extended: ["offer_accepted", "offer_declined"],
-        offer_accepted: ["hired"],
-      };
+    it("moves application through pipeline stages", async () => {
+      const stages = [
+        "SUBMITTED",
+        "UNDER_REVIEW",
+        "SCREENING",
+        "SHORTLISTED",
+        "INTERVIEW_SCHEDULED",
+        "INTERVIEWED",
+        "OFFERED",
+      ];
 
-      expect(Object.keys(validTransitions)).toHaveLength(9);
+      for (const stage of stages) {
+        mockPrisma.jobApplication.update.mockResolvedValue({
+          id: "app-123",
+          status: stage,
+        });
+
+        const result = await mockPrisma.jobApplication.update({
+          where: { id: "app-123" },
+          data: { status: stage },
+        });
+
+        expect(result.status).toBe(stage);
+      }
+    });
+
+    it("adds rating to application", async () => {
+      mockPrisma.jobApplication.update.mockResolvedValue({
+        id: "app-123",
+        rating: 4,
+      });
+
+      const result = await mockPrisma.jobApplication.update({
+        where: { id: "app-123" },
+        data: { rating: 4 },
+      });
+
+      expect(result.rating).toBe(4);
+    });
+  });
+
+  describe("Application validation", () => {
+    it("validates cover letter length", () => {
+      const maxCoverLetterLength = 5000;
+      const validCoverLetter = "a".repeat(maxCoverLetterLength);
+      const invalidCoverLetter = "a".repeat(maxCoverLetterLength + 1);
+
+      expect(validCoverLetter.length).toBeLessThanOrEqual(maxCoverLetterLength);
+      expect(invalidCoverLetter.length).toBeGreaterThan(maxCoverLetterLength);
+    });
+
+    it("validates UUID format", () => {
+      const uuidRegex =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+      expect(uuidRegex.test("550e8400-e29b-41d4-a716-446655440000")).toBe(true);
+      expect(uuidRegex.test("invalid-uuid")).toBe(false);
     });
   });
 
   describe("DELETE /api/applications/:id", () => {
-    it("deletes an application", async () => {
-      mockPrisma.application.delete.mockResolvedValue({ id: "a1" });
-      const result = await mockPrisma.application.delete({ where: { id: "a1" } });
-      expect(result.id).toBe("a1");
-    });
-  });
-
-  describe("Application statistics", () => {
-    it("counts by status", async () => {
-      mockPrisma.application.count
-        .mockResolvedValueOnce(100)
-        .mockResolvedValueOnce(50)
-        .mockResolvedValueOnce(20);
-
-      const total = await mockPrisma.application.count();
-      const screening = await mockPrisma.application.count({
-        where: { status: "screening" },
-      });
-      const interview = await mockPrisma.application.count({
-        where: { status: { in: ["phone_interview", "technical_interview"] } },
+    it("allows candidate to withdraw application", async () => {
+      mockPrisma.jobApplication.update.mockResolvedValue({
+        id: "app-123",
+        status: "WITHDRAWN",
       });
 
-      expect(total).toBe(100);
-      expect(screening).toBe(50);
-      expect(interview).toBe(20);
+      const result = await mockPrisma.jobApplication.update({
+        where: { id: "app-123" },
+        data: { status: "WITHDRAWN" },
+      });
+
+      expect(result.status).toBe("WITHDRAWN");
     });
   });
 });

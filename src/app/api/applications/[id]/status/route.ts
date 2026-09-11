@@ -6,29 +6,32 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const statusUpdateSchema = z.object({
   status: z.enum([
-    "submitted", "screening", "review", "phone_interview",
-    "technical_interview", "final_interview", "offer_pending",
-    "offer_extended", "offer_accepted", "offer_declined",
-    "hired", "rejected", "withdrawn",
+    "SUBMITTED",
+    "UNDER_REVIEW",
+    "SCREENING",
+    "SHORTLISTED",
+    "INTERVIEW_SCHEDULED",
+    "INTERVIEWED",
+    "OFFERED",
+    "ACCEPTED",
+    "REJECTED",
+    "WITHDRAWN",
   ]),
   reason: z.string().optional(),
   notes: z.string().optional(),
 });
 
 const VALID_TRANSITIONS: Record<string, string[]> = {
-  submitted: ["screening", "review", "rejected", "withdrawn"],
-  screening: ["review", "phone_interview", "rejected", "withdrawn"],
-  review: ["phone_interview", "technical_interview", "rejected", "withdrawn"],
-  phone_interview: ["technical_interview", "final_interview", "rejected", "withdrawn"],
-  technical_interview: ["final_interview", "offer_pending", "rejected", "withdrawn"],
-  final_interview: ["offer_pending", "rejected", "withdrawn"],
-  offer_pending: ["offer_extended", "rejected", "withdrawn"],
-  offer_extended: ["offer_accepted", "offer_declined", "withdrawn"],
-  offer_accepted: ["hired"],
-  offer_declined: ["submitted", "withdrawn"],
-  hired: [],
-  rejected: ["submitted"],
-  withdrawn: ["submitted"],
+  SUBMITTED: ["UNDER_REVIEW", "SCREENING", "REJECTED", "WITHDRAWN"],
+  UNDER_REVIEW: ["SCREENING", "SHORTLISTED", "REJECTED", "WITHDRAWN"],
+  SCREENING: ["SHORTLISTED", "INTERVIEW_SCHEDULED", "REJECTED", "WITHDRAWN"],
+  SHORTLISTED: ["INTERVIEW_SCHEDULED", "REJECTED", "WITHDRAWN"],
+  INTERVIEW_SCHEDULED: ["INTERVIEWED", "REJECTED", "WITHDRAWN"],
+  INTERVIEWED: ["OFFERED", "SHORTLISTED", "REJECTED", "WITHDRAWN"],
+  OFFERED: ["ACCEPTED", "REJECTED", "WITHDRAWN"],
+  ACCEPTED: [],
+  REJECTED: ["SUBMITTED"],
+  WITHDRAWN: ["SUBMITTED"],
 };
 
 export async function PATCH(
@@ -41,10 +44,12 @@ export async function PATCH(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const application = await prisma.application.findUnique({
+    const application = await prisma.jobApplication.findUnique({
       where: { id: params.id },
       include: {
-        candidate: { select: { name: true } },
+        candidate: {
+          include: { user: { select: { name: true } } },
+        },
         job: { select: { title: true } },
       },
     });
@@ -76,34 +81,24 @@ export async function PATCH(
 
     const previousStatus = application.status;
 
-    const [updated] = await prisma.$transaction([
-      prisma.application.update({
+    const updated = await prisma.jobApplication.update({
+      where: { id: params.id },
+      data: { status: validated.status },
+    });
+
+    if (validated.status === "REJECTED" && validated.reason) {
+      await prisma.jobApplication.update({
         where: { id: params.id },
-        data: { status: validated.status },
-      }),
-      prisma.timelineEvent.create({
-        data: {
-          type: "status_change",
-          title: `Status changed from ${previousStatus} to ${validated.status}`,
-          description: validated.reason || validated.notes || undefined,
-          metadata: {
-            previousStatus,
-            newStatus: validated.status,
-            changedBy: session.user.id,
-            reason: validated.reason,
-          },
-          applicationId: params.id,
-        },
-      }),
-    ]);
+        data: { rejectedReason: validated.reason },
+      });
+    }
 
     if (validated.notes) {
-      await prisma.applicationNote.create({
+      await prisma.candidateNote.create({
         data: {
-          content: validated.notes,
-          type: "general",
-          applicationId: params.id,
+          content: `[Status Change: ${previousStatus} → ${validated.status}] ${validated.notes}`,
           authorId: session.user.id,
+          candidateId: application.candidateId,
         },
       });
     }

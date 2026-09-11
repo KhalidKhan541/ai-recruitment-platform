@@ -1,9 +1,10 @@
 import { prisma } from "@/lib/prisma";
+import { AppError } from "@/lib/errors";
 import { InterviewType, InterviewStatus } from "@/types/job";
 
 // ─── Interview Service ───────────────────────────────────────────────────────
 // Handles interview scheduling, panel management, scoring rubrics,
-// feedback collection, and availability conflict detection.
+// feedback collection, availability conflict detection, and reminders.
 
 export interface Interview {
   id: string;
@@ -58,6 +59,7 @@ export interface Scorecard {
   weaknesses: string[];
   recommendation: Recommendation;
   notes: string | null;
+  submittedAt: Date | null;
 }
 
 export interface InterviewNote {
@@ -65,36 +67,31 @@ export interface InterviewNote {
   content: string;
   authorId: string;
   authorName: string;
-  authorImage: string | null;
   isPrivate: boolean;
   createdAt: Date;
 }
 
 export interface InterviewFeedback {
   id: string;
-  reviewerId: string;
-  reviewerName: string;
-  reviewerImage: string | null;
-  technicalScore: number;
-  communicationScore: number;
-  problemSolvingScore: number;
-  culturalFitScore: number;
-  leadershipScore: number;
-  overallScore: number;
-  strengths: string[];
-  weaknesses: string[];
-  recommendation: Recommendation;
-  notes: string;
+  panelMemberId: string;
+  panelMemberName: string;
+  scorecard: Scorecard;
+  comments: string;
   submittedAt: Date;
 }
 
-export type Recommendation = "STRONG_HIRE" | "HIRE" | "NEUTRAL" | "NO_HIRE" | "STRONG_NO_HIRE";
+export type Recommendation =
+  | "STRONG_YES"
+  | "YES"
+  | "MAYBE"
+  | "NO"
+  | "STRONG_NO";
 
 export interface InterviewSlot {
-  startTime: Date;
-  endTime: Date;
+  start: Date;
+  end: Date;
+  interviewerId: string;
   available: boolean;
-  conflictReason: string | null;
 }
 
 export interface CreateInterviewInput {
@@ -114,23 +111,20 @@ export interface CreateInterviewInput {
 
 export interface UpdateInterviewInput {
   type?: InterviewType;
-  status?: InterviewStatus;
   title?: string;
   description?: string;
   scheduledAt?: Date;
   duration?: number;
   location?: string;
   meetingUrl?: string;
-  meetingId?: string;
-  meetingPassword?: string;
+  status?: InterviewStatus;
   cancelReason?: string;
-  noShowReason?: string;
 }
 
 export interface InterviewFilter {
-  applicationId?: string;
   jobId?: string;
   candidateId?: string;
+  applicationId?: string;
   type?: InterviewType[];
   status?: InterviewStatus[];
   panelMemberId?: string;
@@ -143,10 +137,11 @@ export interface InterviewStats {
   byType: { type: InterviewType; count: number }[];
   byStatus: { status: InterviewStatus; count: number }[];
   averageScore: number;
-  noShowRate: number;
+  averageDuration: number;
+  upcomingCount: number;
   completionRate: number;
+  noShowRate: number;
   averageTimeToSchedule: number;
-  upcomingInterviews: number;
 }
 
 export class InterviewService {
@@ -156,30 +151,21 @@ export class InterviewService {
     const application = await prisma.application.findUnique({
       where: { id: input.applicationId },
       include: {
-        job: { select: { id: true, title: true } },
-        candidate: { select: { id: true, firstName: true, lastName: true, email: true } },
+        job: { select: { id: true, firmId: true } },
+        candidate: { select: { id: true, firstName: true, lastName: true } },
       },
     });
-    if (!application) throw new Error("Application not found");
+    if (!application) throw AppError.notFound("Application");
 
-    // Check for scheduling conflicts with panel members
-    const conflicts = await this.checkPanelConflicts(
+    const conflicts = await this.checkConflicts(
       input.panelMemberIds,
       input.scheduledAt,
       input.duration
     );
     if (conflicts.length > 0) {
-      throw new Error(`Panel member scheduling conflict: ${conflicts.map((c) => c.name).join(", ")}`);
-    }
-
-    // Check for candidate conflict
-    const candidateConflict = await this.checkCandidateConflict(
-      application.candidateId,
-      input.scheduledAt,
-      input.duration
-    );
-    if (candidateConflict) {
-      throw new Error("Candidate has a conflicting interview at this time");
+      throw AppError.badRequest(
+        `Scheduling conflict for interviewer(s): ${conflicts.map((c) => c.interviewerName).join(", ")}`
+      );
     }
 
     const interview = await prisma.interview.create({
@@ -206,40 +192,18 @@ export class InterviewService {
       include: {
         panelMembers: {
           include: {
-            user: {
-              select: { id: true, name: true, email: true, image: true },
-            },
+            user: { select: { id: true, name: true, email: true, image: true } },
           },
         },
         scorecard: true,
-        notes: {
-          include: { author: { select: { id: true, name: true, image: true } } },
-          orderBy: { createdAt: "desc" },
-        },
-        feedback: {
-          include: { reviewer: { select: { id: true, name: true, image: true } } },
-        },
+        notes: true,
+        feedback: true,
       },
     });
 
-    // Update application status
-    const statusMap: Record<string, string> = {
-      PHONE: "PHONE_INTERVIEW",
-      VIDEO: "PHONE_INTERVIEW",
-      ON_SITE: "FINAL_INTERVIEW",
-      TECHNICAL: "TECHNICAL_INTERVIEW",
-      PANEL: "FINAL_INTERVIEW",
-      CULTURAL: "FINAL_INTERVIEW",
-      EXECUTIVE: "FINAL_INTERVIEW",
-    };
-
-    const newStatus = statusMap[input.type] ?? "PHONE_INTERVIEW";
     await prisma.application.update({
       where: { id: input.applicationId },
-      data: {
-        status: newStatus as any,
-        lastStatusChangeAt: new Date(),
-      },
+      data: { status: "INTERVIEWING" },
     });
 
     return this.formatInterview(interview);
@@ -251,30 +215,42 @@ export class InterviewService {
       include: {
         panelMembers: {
           include: {
-            user: {
-              select: { id: true, name: true, email: true, image: true },
-            },
+            user: { select: { id: true, name: true, email: true, image: true } },
+            scorecard: true,
           },
         },
         scorecard: true,
         notes: {
-          include: { author: { select: { id: true, name: true, image: true } } },
+          include: {
+            author: { select: { id: true, name: true, image: true } },
+          },
           orderBy: { createdAt: "desc" },
         },
         feedback: {
-          include: { reviewer: { select: { id: true, name: true, image: true } } },
+          include: {
+            panelMember: {
+              include: {
+                user: { select: { id: true, name: true } },
+              },
+            },
+          },
         },
         application: {
           select: {
-            id: true, status: true,
-            candidate: { select: { id: true, firstName: true, lastName: true, email: true } },
+            id: true,
+            candidate: { select: { firstName: true, lastName: true, email: true } },
           },
         },
-        job: { select: { id: true, title: true, department: true } },
       },
     });
 
     return interview ? this.formatInterview(interview) : null;
+  }
+
+  async getByIdOrThrow(interviewId: string): Promise<Interview> {
+    const interview = await this.getById(interviewId);
+    if (!interview) throw AppError.notFound("Interview");
+    return interview;
   }
 
   async getAll(
@@ -292,26 +268,17 @@ export class InterviewService {
         include: {
           panelMembers: {
             include: {
-              user: {
-                select: { id: true, name: true, email: true, image: true },
-              },
+              user: { select: { id: true, name: true, email: true, image: true } },
+              scorecard: true,
             },
           },
           scorecard: true,
-          notes: {
-            include: { author: { select: { id: true, name: true, image: true } } },
-            orderBy: { createdAt: "desc" },
-            take: 1,
-          },
-          feedback: {
-            include: { reviewer: { select: { id: true, name: true, image: true } } },
-          },
           application: {
             select: {
+              id: true,
               candidate: { select: { firstName: true, lastName: true, email: true } },
             },
           },
-          job: { select: { id: true, title: true } },
         },
         skip,
         take: limit,
@@ -326,30 +293,31 @@ export class InterviewService {
     };
   }
 
-  async update(interviewId: string, input: UpdateInterviewInput): Promise<Interview> {
-    const existing = await prisma.interview.findUnique({ where: { id: interviewId } });
-    if (!existing) throw new Error("Interview not found");
+  async update(
+    interviewId: string,
+    input: UpdateInterviewInput,
+    updatedBy: string
+  ): Promise<Interview> {
+    const existing = await this.getByIdOrThrow(interviewId);
+
+    if (["COMPLETED", "CANCELLED", "NO_SHOW"].includes(existing.status)) {
+      throw AppError.badRequest("Cannot update a completed, cancelled, or no-show interview");
+    }
 
     const data: Record<string, unknown> = {};
 
     if (input.type !== undefined) data.type = input.type;
     if (input.title !== undefined) data.title = input.title;
     if (input.description !== undefined) data.description = input.description;
-    if (input.scheduledAt !== undefined) data.scheduledAt = input.scheduledAt;
     if (input.duration !== undefined) data.duration = input.duration;
     if (input.location !== undefined) data.location = input.location;
     if (input.meetingUrl !== undefined) data.meetingUrl = input.meetingUrl;
-    if (input.meetingId !== undefined) data.meetingId = input.meetingId;
-    if (input.meetingPassword !== undefined) data.meetingPassword = input.meetingPassword;
-    if (input.cancelReason !== undefined) data.cancelReason = input.cancelReason;
-    if (input.noShowReason !== undefined) data.noShowReason = input.noShowReason;
+    if (input.status !== undefined) data.status = input.status;
 
-    if (input.status !== undefined) {
-      data.status = input.status;
-      if (input.status === "RESCHEDULED") {
-        data.rescheduledFrom = existing.id;
-        data.status = "SCHEDULED";
-      }
+    if (input.scheduledAt !== undefined) {
+      data.scheduledAt = input.scheduledAt;
+      data.rescheduledFrom = existing.scheduledAt.toISOString();
+      data.status = "RESCHEDULED";
     }
 
     const updated = await prisma.interview.update({
@@ -358,78 +326,96 @@ export class InterviewService {
       include: {
         panelMembers: {
           include: {
-            user: {
-              select: { id: true, name: true, email: true, image: true },
-            },
+            user: { select: { id: true, name: true, email: true, image: true } },
+            scorecard: true,
           },
         },
         scorecard: true,
-        notes: {
-          include: { author: { select: { id: true, name: true, image: true } } },
-          orderBy: { createdAt: "desc" },
-        },
-        feedback: {
-          include: { reviewer: { select: { id: true, name: true, image: true } } },
-        },
+        notes: true,
+        feedback: true,
       },
     });
 
     return this.formatInterview(updated);
   }
 
-  async cancel(interviewId: string, reason: string): Promise<Interview> {
-    return this.update(interviewId, {
-      status: "CANCELLED",
-      cancelReason: reason,
-    });
+  async cancel(
+    interviewId: string,
+    cancelledBy: string,
+    reason: string
+  ): Promise<Interview> {
+    const interview = await this.getByIdOrThrow(interviewId);
+
+    if (["COMPLETED", "CANCELLED"].includes(interview.status)) {
+      throw AppError.badRequest("Interview is already completed or cancelled");
+    }
+
+    return this.update(
+      interviewId,
+      { status: "CANCELLED", cancelReason: reason },
+      cancelledBy
+    );
   }
 
   async reschedule(
     interviewId: string,
     newScheduledAt: Date,
+    rescheduledBy: string,
     reason?: string
   ): Promise<Interview> {
-    const existing = await prisma.interview.findUnique({
-      where: { id: interviewId },
-      include: { panelMembers: true },
-    });
-    if (!existing) throw new Error("Interview not found");
+    const interview = await this.getByIdOrThrow(interviewId);
 
-    const panelMemberIds = existing.panelMembers.map((p) => p.userId);
-    const conflicts = await this.checkPanelConflicts(
-      panelMemberIds,
-      newScheduledAt,
-      existing.duration
-    );
-    if (conflicts.length > 0) {
-      throw new Error(`Panel member scheduling conflict: ${conflicts.map((c) => c.name).join(", ")}`);
+    if (["COMPLETED", "CANCELLED"].includes(interview.status)) {
+      throw AppError.badRequest("Cannot reschedule a completed or cancelled interview");
     }
 
-    return this.update(interviewId, {
-      scheduledAt: newScheduledAt,
-      status: "RESCHEDULED",
-    });
+    const panelMemberIds = interview.panelMembers.map((p) => p.userId);
+    const conflicts = await this.checkConflicts(
+      panelMemberIds,
+      newScheduledAt,
+      interview.duration
+    );
+    if (conflicts.length > 0) {
+      throw AppError.badRequest(
+        `Scheduling conflict for interviewer(s): ${conflicts.map((c) => c.interviewerName).join(", ")}`
+      );
+    }
+
+    return this.update(
+      interviewId,
+      { scheduledAt: newScheduledAt },
+      rescheduledBy
+    );
   }
 
-  async delete(interviewId: string): Promise<void> {
-    await prisma.interview.delete({ where: { id: interviewId } });
-  }
-
-  // ─── Panel Management ──────────────────────────────────────────────────────
+  // ─── Panel Management ───────────────────────────────────────────────────────
 
   async addPanelMember(
     interviewId: string,
     userId: string,
     role = "INTERVIEWER"
   ): Promise<void> {
-    const interview = await prisma.interview.findUnique({
-      where: { id: interviewId },
-      include: { panelMembers: true },
-    });
-    if (!interview) throw new Error("Interview not found");
+    const interview = await this.getByIdOrThrow(interviewId);
 
-    const existing = interview.panelMembers.find((p) => p.userId === userId);
-    if (existing) throw new Error("User is already a panel member");
+    if (["COMPLETED", "CANCELLED"].includes(interview.status)) {
+      throw AppError.badRequest("Cannot modify panel for a completed or cancelled interview");
+    }
+
+    const existingMember = interview.panelMembers.find((p) => p.userId === userId);
+    if (existingMember) {
+      throw AppError.conflict("User is already on the interview panel");
+    }
+
+    const conflicts = await this.checkConflicts(
+      [userId],
+      interview.scheduledAt,
+      interview.duration
+    );
+    if (conflicts.length > 0) {
+      throw AppError.badRequest(
+        `Scheduling conflict for the proposed panel member`
+      );
+    }
 
     await prisma.interviewPanelMember.create({
       data: {
@@ -441,272 +427,177 @@ export class InterviewService {
   }
 
   async removePanelMember(interviewId: string, userId: string): Promise<void> {
+    const interview = await this.getByIdOrThrow(interviewId);
+
+    if (interview.panelMembers.length <= 1) {
+      throw AppError.badRequest("Cannot remove the last panel member");
+    }
+
     await prisma.interviewPanelMember.deleteMany({
       where: { interviewId, userId },
     });
   }
 
-  async getPanelAvailability(
-    panelMemberIds: string[],
-    dateRange: { start: Date; end: Date }
-  ): Promise<Map<string, InterviewSlot[]>> {
-    const availability = new Map<string, InterviewSlot[]>();
+  // ─── Scoring & Feedback ─────────────────────────────────────────────────────
 
-    for (const userId of panelMemberIds) {
-      const existingInterviews = await prisma.interview.findMany({
-        where: {
-          panelMembers: { some: { userId } },
-          scheduledAt: {
-            gte: dateRange.start,
-            lte: dateRange.end,
-          },
-          status: { notIn: ["CANCELLED"] },
-        },
-        select: { scheduledAt: true, duration: true },
-      });
+  async submitScorecard(
+    interviewId: string,
+    panelMemberId: string,
+    scorecard: Omit<Scorecard, "id" | "submittedAt">
+  ): Promise<void> {
+    const interview = await this.getByIdOrThrow(interviewId);
 
-      const slots: InterviewSlot[] = [];
-      const currentDate = new Date(dateRange.start);
-
-      while (currentDate <= dateRange.end) {
-        for (let hour = 9; hour < 18; hour++) {
-          const slotStart = new Date(currentDate);
-          slotStart.setHours(hour, 0, 0, 0);
-          const slotEnd = new Date(slotStart);
-          slotEnd.setHours(hour + 1);
-
-          const conflict = existingInterviews.find((interview) => {
-            const interviewEnd = new Date(interview.scheduledAt);
-            interviewEnd.setMinutes(interviewEnd.getMinutes() + interview.duration);
-            return slotStart < interviewEnd && slotEnd > interview.scheduledAt;
-          });
-
-          slots.push({
-            startTime: slotStart,
-            endTime: slotEnd,
-            available: !conflict,
-            conflictReason: conflict ? "Existing interview" : null,
-          });
-        }
-        currentDate.setDate(currentDate.getDate() + 1);
-      }
-
-      availability.set(userId, slots);
+    if (interview.status === "CANCELLED") {
+      throw AppError.badRequest("Cannot submit scorecard for a cancelled interview");
     }
 
-    return availability;
-  }
+    this.validateScorecard(scorecard);
 
-  private async checkPanelConflicts(
-    panelMemberIds: string[],
-    scheduledAt: Date,
-    duration: number
-  ): Promise<{ userId: string; name: string }[]> {
-    const interviewEnd = new Date(scheduledAt);
-    interviewEnd.setMinutes(interviewEnd.getMinutes() + duration);
+    const existingScorecard = await prisma.interviewScorecard.findFirst({
+      where: { interviewId, panelMemberId },
+    });
 
-    const conflicts = await prisma.interviewPanelMember.findMany({
-      where: {
-        userId: { in: panelMemberIds },
-        interview: {
-          scheduledAt: {
-            lt: interviewEnd,
-          },
-          status: { notIn: ["CANCELLED", "NO_SHOW"] },
+    if (existingScorecard) {
+      await prisma.interviewScorecard.update({
+        where: { id: existingScorecard.id },
+        data: {
+          technicalScore: scorecard.technicalScore,
+          communicationScore: scorecard.communicationScore,
+          problemSolvingScore: scorecard.problemSolvingScore,
+          culturalFitScore: scorecard.culturalFitScore,
+          leadershipScore: scorecard.leadershipScore,
+          overallScore: this.calculateOverallScore(scorecard),
+          strengths: JSON.stringify(scorecard.strengths),
+          weaknesses: JSON.stringify(scorecard.weaknesses),
+          recommendation: scorecard.recommendation,
+          notes: scorecard.notes,
+          submittedAt: new Date(),
         },
-      },
-      include: {
-        user: { select: { id: true, name: true } },
-        interview: { select: { scheduledAt: true, duration: true } },
-      },
-    });
+      });
+    } else {
+      await prisma.interviewScorecard.create({
+        data: {
+          interviewId,
+          panelMemberId,
+          technicalScore: scorecard.technicalScore,
+          communicationScore: scorecard.communicationScore,
+          problemSolvingScore: scorecard.problemSolvingScore,
+          culturalFitScore: scorecard.culturalFitScore,
+          leadershipScore: scorecard.leadershipScore,
+          overallScore: this.calculateOverallScore(scorecard),
+          strengths: JSON.stringify(scorecard.strengths),
+          weaknesses: JSON.stringify(scorecard.weaknesses),
+          recommendation: scorecard.recommendation,
+          notes: scorecard.notes,
+          submittedAt: new Date(),
+        },
+      });
+    }
 
-    const actualConflicts = conflicts.filter((c) => {
-      const existingEnd = new Date(c.interview.scheduledAt);
-      existingEnd.setMinutes(existingEnd.getMinutes() + c.interview.duration);
-      return scheduledAt < existingEnd && interviewEnd > c.interview.scheduledAt;
-    });
-
-    return actualConflicts.map((c) => ({
-      userId: c.userId,
-      name: c.user.name ?? "Unknown",
-    }));
+    await this.recalculateInterviewScore(interviewId);
   }
-
-  private async checkCandidateConflict(
-    candidateId: string,
-    scheduledAt: Date,
-    duration: number
-  ): Promise<boolean> {
-    const interviewEnd = new Date(scheduledAt);
-    interviewEnd.setMinutes(interviewEnd.getMinutes() + duration);
-
-    const conflict = await prisma.interview.findFirst({
-      where: {
-        candidateId,
-        scheduledAt: { lt: interviewEnd },
-        status: { notIn: ["CANCELLED", "NO_SHOW"] },
-      },
-    });
-
-    if (!conflict) return false;
-
-    const conflictEnd = new Date(conflict.scheduledAt);
-    conflictEnd.setMinutes(conflictEnd.getMinutes() + conflict.duration);
-    return scheduledAt < conflictEnd && interviewEnd > conflict.scheduledAt;
-  }
-
-  // ─── Scoring & Feedback ────────────────────────────────────────────────────
 
   async submitFeedback(
     interviewId: string,
-    reviewerId: string,
-    reviewerName: string,
-    feedback: Omit<InterviewFeedback, "id" | "reviewerId" | "reviewerName" | "reviewerImage" | "submittedAt">
-  ): Promise<InterviewFeedback> {
-    const existing = await prisma.interviewFeedback.findFirst({
-      where: { interviewId, reviewerId },
+    panelMemberId: string,
+    comments: string,
+    scorecard: Omit<Scorecard, "id" | "submittedAt">
+  ): Promise<void> {
+    await this.submitScorecard(interviewId, panelMemberId, scorecard);
+
+    const panelMember = await prisma.interviewPanelMember.findFirst({
+      where: { interviewId, userId: panelMemberId },
     });
+    if (!panelMember) throw AppError.badRequest("User is not on the interview panel");
 
-    if (existing) {
-      const updated = await prisma.interviewFeedback.update({
-        where: { id: existing.id },
-        data: {
-          technicalScore: feedback.technicalScore,
-          communicationScore: feedback.communicationScore,
-          problemSolvingScore: feedback.problemSolvingScore,
-          culturalFitScore: feedback.culturalFitScore,
-          leadershipScore: feedback.leadershipScore,
-          overallScore: feedback.overallScore,
-          strengths: JSON.stringify(feedback.strengths),
-          weaknesses: JSON.stringify(feedback.weaknesses),
-          recommendation: feedback.recommendation,
-          notes: feedback.notes,
-        },
-        include: {
-          reviewer: { select: { id: true, name: true, image: true } },
-        },
-      });
-
-      return {
-        id: updated.id,
-        reviewerId: updated.reviewerId,
-        reviewerName: updated.reviewer?.name ?? reviewerName,
-        reviewerImage: updated.reviewer?.image ?? null,
-        technicalScore: updated.technicalScore,
-        communicationScore: updated.communicationScore,
-        problemSolvingScore: updated.problemSolvingScore,
-        culturalFitScore: updated.culturalFitScore,
-        leadershipScore: updated.leadershipScore,
-        overallScore: updated.overallScore,
-        strengths: JSON.parse(updated.strengths as string),
-        weaknesses: JSON.parse(updated.weaknesses as string),
-        recommendation: updated.recommendation as Recommendation,
-        notes: updated.notes,
-        submittedAt: updatedAt,
-      };
-    }
-
-    const created = await prisma.interviewFeedback.create({
+    await prisma.interviewFeedback.create({
       data: {
         interviewId,
-        reviewerId,
-        technicalScore: feedback.technicalScore,
-        communicationScore: feedback.communicationScore,
-        problemSolvingScore: feedback.problemSolvingScore,
-        culturalFitScore: feedback.culturalFitScore,
-        leadershipScore: feedback.leadershipScore,
-        overallScore: feedback.overallScore,
-        strengths: JSON.stringify(feedback.strengths),
-        weaknesses: JSON.stringify(feedback.weaknesses),
-        recommendation: feedback.recommendation,
-        notes: feedback.notes,
-      },
-      include: {
-        reviewer: { select: { id: true, name: true, image: true } },
+        panelMemberId: panelMember.id,
+        comments,
       },
     });
+  }
 
-    // Calculate average score
-    const allFeedback = await prisma.interviewFeedback.findMany({
-      where: { interviewId },
+  private validateScorecard(scorecard: Omit<Scorecard, "id" | "submittedAt">): void {
+    const scores = [
+      scorecard.technicalScore,
+      scorecard.communicationScore,
+      scorecard.problemSolvingScore,
+      scorecard.culturalFitScore,
+      scorecard.leadershipScore,
+    ];
+
+    for (const score of scores) {
+      if (score !== null && (score < 0 || score > 10)) {
+        throw AppError.badRequest("All scores must be between 0 and 10");
+      }
+    }
+
+    if (!["STRONG_YES", "YES", "MAYBE", "NO", "STRONG_NO"].includes(scorecard.recommendation)) {
+      throw AppError.badRequest("Invalid recommendation value");
+    }
+  }
+
+  private calculateOverallScore(scorecard: Omit<Scorecard, "id" | "submittedAt">): number {
+    const scores = [
+      scorecard.technicalScore,
+      scorecard.communicationScore,
+      scorecard.problemSolvingScore,
+      scorecard.culturalFitScore,
+      scorecard.leadershipScore,
+    ].filter((s): s is number => s !== null);
+
+    if (scores.length === 0) return 0;
+    return Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10;
+  }
+
+  private async recalculateInterviewScore(interviewId: string): Promise<void> {
+    const scorecards = await prisma.interviewScorecard.findMany({
+      where: { interviewId, submittedAt: { not: null } },
     });
 
-    const avgScore =
-      allFeedback.reduce((sum, f) => sum + f.overallScore, 0) / allFeedback.length;
+    if (scorecards.length === 0) return;
 
-    const recommendationCounts = allFeedback.reduce((acc, f) => {
-      acc[f.recommendation] = (acc[f.recommendation] ?? 0) + 1;
-      return acc;
-    }, {} as Record<string, number>);
+    const overallScores = scorecards
+      .map((s) => s.overallScore)
+      .filter((s): s is number => s !== null);
 
-    const finalRecommendation: Recommendation =
-      (recommendationCounts["STRONG_HIRE"] ?? 0) >= allFeedback.length / 2
-        ? "STRONG_HIRE"
-        : (recommendationCounts["HIRE"] ?? 0) >= allFeedback.length / 2
-        ? "HIRE"
-        : (recommendationCounts["NO_HIRE"] ?? 0) >= allFeedback.length / 2
-        ? "NO_HIRE"
-        : (recommendationCounts["STRONG_NO_HIRE"] ?? 0) >= allFeedback.length / 2
-        ? "STRONG_NO_HIRE"
-        : "NEUTRAL";
+    const avgScore = overallScores.length > 0
+      ? Math.round((overallScores.reduce((a, b) => a + b, 0) / overallScores.length) * 10) / 10
+      : null;
+
+    const recommendations = scorecards.map((s) => s.recommendation);
+    const overallRecommendation = this.calculateOverallRecommendation(recommendations);
 
     await prisma.interview.update({
       where: { id: interviewId },
       data: {
         overallScore: avgScore,
-        recommendation: finalRecommendation,
+        recommendation: overallRecommendation,
       },
     });
+  }
 
-    return {
-      id: created.id,
-      reviewerId: created.reviewerId,
-      reviewerName: created.reviewer?.name ?? reviewerName,
-      reviewerImage: created.reviewer?.image ?? null,
-      technicalScore: created.technicalScore,
-      communicationScore: created.communicationScore,
-      problemSolvingScore: created.problemSolvingScore,
-      culturalFitScore: created.culturalFitScore,
-      leadershipScore: created.leadershipScore,
-      overallScore: created.overallScore,
-      strengths: JSON.parse(created.strengths as string),
-      weaknesses: JSON.parse(created.weaknesses as string),
-      recommendation: created.recommendation as Recommendation,
-      notes: created.notes,
-      submittedAt: created.submittedAt,
+  private calculateOverallRecommendation(recommendations: string[]): Recommendation {
+    const scoreMap: Record<string, number> = {
+      STRONG_YES: 5,
+      YES: 4,
+      MAYBE: 3,
+      NO: 2,
+      STRONG_NO: 1,
     };
+
+    const avg = recommendations.reduce((sum, r) => sum + (scoreMap[r] ?? 3), 0) / recommendations.length;
+
+    if (avg >= 4.5) return "STRONG_YES";
+    if (avg >= 3.5) return "YES";
+    if (avg >= 2.5) return "MAYBE";
+    if (avg >= 1.5) return "NO";
+    return "STRONG_NO";
   }
 
-  async getFeedback(interviewId: string): Promise<InterviewFeedback[]> {
-    const feedbacks = await prisma.interviewFeedback.findMany({
-      where: { interviewId },
-      include: {
-        reviewer: { select: { id: true, name: true, image: true } },
-      },
-      orderBy: { submittedAt: "desc" },
-    });
-
-    return feedbacks.map((f) => ({
-      id: f.id,
-      reviewerId: f.reviewerId,
-      reviewerName: f.reviewer?.name ?? "Unknown",
-      reviewerImage: f.reviewer?.image ?? null,
-      technicalScore: f.technicalScore,
-      communicationScore: f.communicationScore,
-      problemSolvingScore: f.problemSolvingScore,
-      culturalFitScore: f.culturalFitScore,
-      leadershipScore: f.leadershipScore,
-      overallScore: f.overallScore,
-      strengths: JSON.parse(f.strengths as string),
-      weaknesses: JSON.parse(f.weaknesses as string),
-      recommendation: f.recommendation as Recommendation,
-      notes: f.notes,
-      submittedAt: f.submittedAt,
-    }));
-  }
-
-  // ─── Notes ─────────────────────────────────────────────────────────────────
+  // ─── Notes ──────────────────────────────────────────────────────────────────
 
   async addNote(
     interviewId: string,
@@ -715,11 +606,13 @@ export class InterviewService {
     content: string,
     isPrivate = false
   ): Promise<InterviewNote> {
+    await this.getByIdOrThrow(interviewId);
+
     const note = await prisma.interviewNote.create({
       data: {
         interviewId,
         authorId,
-        content,
+        content: content.trim(),
         isPrivate,
       },
       include: {
@@ -732,103 +625,245 @@ export class InterviewService {
       content: note.content,
       authorId: note.authorId,
       authorName: note.author?.name ?? authorName,
-      authorImage: note.author?.image ?? null,
       isPrivate: note.isPrivate,
       createdAt: note.createdAt,
     };
   }
 
-  async getNotes(interviewId: string, includePrivate = false): Promise<InterviewNote[]> {
-    const where: Record<string, unknown> = { interviewId };
-    if (!includePrivate) where.isPrivate = false;
+  // ─── Availability & Conflict Detection ──────────────────────────────────────
 
-    const notes = await prisma.interviewNote.findMany({
-      where,
-      include: {
-        author: { select: { id: true, name: true, image: true } },
+  async checkConflicts(
+    interviewerIds: string[],
+    scheduledAt: Date,
+    durationMinutes: number
+  ): Promise<Array<{ interviewerId: string; interviewerName: string; conflictStart: Date; conflictEnd: Date }>> {
+    const endTime = new Date(scheduledAt.getTime() + durationMinutes * 60 * 1000);
+
+    const conflictingInterviews = await prisma.interview.findMany({
+      where: {
+        panelMembers: {
+          some: { userId: { in: interviewerIds } },
+        },
+        status: { in: ["SCHEDULED", "RESCHEDULED", "IN_PROGRESS"] },
+        scheduledAt: { lt: endTime },
+        OR: [
+          { duration: { gte: durationMinutes } },
+          {
+            scheduledAt: {
+              gte: new Date(scheduledAt.getTime() - 120 * 60 * 1000),
+            },
+          },
+        ],
       },
-      orderBy: { createdAt: "desc" },
+      include: {
+        panelMembers: {
+          include: {
+            user: { select: { id: true, name: true } },
+          },
+        },
+      },
     });
 
-    return notes.map((n) => ({
-      id: n.id,
-      content: n.content,
-      authorId: n.authorId,
-      authorName: n.author?.name ?? "Unknown",
-      authorImage: n.author?.image ?? null,
-      isPrivate: n.isPrivate,
-      createdAt: n.createdAt,
-    }));
+    const conflicts: Array<{
+      interviewerId: string;
+      interviewerName: string;
+      conflictStart: Date;
+      conflictEnd: Date;
+    }> = [];
+
+    for (const interview of conflictingInterviews) {
+      const interviewEnd = new Date(
+        interview.scheduledAt.getTime() + interview.duration * 60 * 1000
+      );
+
+      const hasOverlap =
+        scheduledAt < interviewEnd && endTime > interview.scheduledAt;
+
+      if (hasOverlap) {
+        for (const member of interview.panelMembers) {
+          if (interviewerIds.includes(member.userId)) {
+            conflicts.push({
+              interviewerId: member.userId,
+              interviewerName: member.user?.name ?? "Unknown",
+              conflictStart: interview.scheduledAt,
+              conflictEnd: interviewEnd,
+            });
+          }
+        }
+      }
+    }
+
+    return conflicts;
   }
 
-  // ─── Analytics ─────────────────────────────────────────────────────────────
+  async getAvailableSlots(
+    interviewerIds: string[],
+    date: Date,
+    durationMinutes: number,
+    slotInterval = 30
+  ): Promise<InterviewSlot[]> {
+    const dayStart = new Date(date);
+    dayStart.setHours(9, 0, 0, 0);
+    const dayEnd = new Date(date);
+    dayEnd.setHours(18, 0, 0, 0);
+
+    const existingInterviews = await prisma.interview.findMany({
+      where: {
+        panelMembers: {
+          some: { userId: { in: interviewerIds } },
+        },
+        status: { in: ["SCHEDULED", "RESCHEDULED"] },
+        scheduledAt: {
+          gte: dayStart,
+          lte: dayEnd,
+        },
+      },
+      select: {
+        scheduledAt: true,
+        duration: true,
+      },
+    });
+
+    const slots: InterviewSlot[] = [];
+    let current = new Date(dayStart);
+
+    while (current.getTime() + durationMinutes * 60 * 1000 <= dayEnd.getTime()) {
+      const slotEnd = new Date(current.getTime() + durationMinutes * 60 * 1000);
+
+      const isAvailable = !existingInterviews.some((interview) => {
+        const interviewEnd = new Date(
+          interview.scheduledAt.getTime() + interview.duration * 60 * 1000
+        );
+        return current < interviewEnd && slotEnd > interview.scheduledAt;
+      });
+
+      for (const interviewerId of interviewerIds) {
+        slots.push({
+          start: new Date(current),
+          end: new Date(slotEnd),
+          interviewerId,
+          available: isAvailable,
+        });
+      }
+
+      current = new Date(current.getTime() + slotInterval * 60 * 1000);
+    }
+
+    return slots;
+  }
+
+  // ─── Analytics ──────────────────────────────────────────────────────────────
 
   async getStats(firmId: string): Promise<InterviewStats> {
-    const [
-      totalInterviews,
-      byType,
-      byStatus,
-      scoreAgg,
-      noShowCount,
-      completedCount,
-      upcomingCount,
-    ] = await Promise.all([
-      prisma.interview.count({
-        where: { job: { firmId } },
-      }),
-      prisma.interview.groupBy({
-        by: ["type"],
-        where: { job: { firmId } },
-        _count: true,
-      }),
-      prisma.interview.groupBy({
-        by: ["status"],
-        where: { job: { firmId } },
-        _count: true,
-      }),
-      prisma.interview.aggregate({
-        where: { job: { firmId }, overallScore: { not: null } },
-        _avg: { overallScore: true },
-      }),
-      prisma.interview.count({
-        where: { job: { firmId }, status: "NO_SHOW" },
-      }),
-      prisma.interview.count({
-        where: { job: { firmId }, status: "COMPLETED" },
-      }),
-      prisma.interview.count({
-        where: { job: { firmId }, status: "SCHEDULED", scheduledAt: { gte: new Date() } },
-      }),
-    ]);
+    const where = { job: { firmId } };
+
+    const [total, byType, byStatus, scoreAgg, durationAgg, completedCount, noShowCount] =
+      await Promise.all([
+        prisma.interview.count({ where }),
+        prisma.interview.groupBy({
+          by: ["type"],
+          where,
+          _count: true,
+        }),
+        prisma.interview.groupBy({
+          by: ["status"],
+          where,
+          _count: true,
+        }),
+        prisma.interview.aggregate({
+          where: { ...where, overallScore: { not: null } },
+          _avg: { overallScore: true },
+        }),
+        prisma.interview.aggregate({
+          where,
+          _avg: { duration: true },
+        }),
+        prisma.interview.count({
+          where: { ...where, status: "COMPLETED" },
+        }),
+        prisma.interview.count({
+          where: { ...where, status: "NO_SHOW" },
+        }),
+      ]);
+
+    const upcoming = await prisma.interview.count({
+      where: {
+        ...where,
+        status: { in: ["SCHEDULED", "RESCHEDULED"] },
+        scheduledAt: { gte: new Date() },
+      },
+    });
 
     return {
-      totalInterviews,
+      totalInterviews: total,
       byType: byType.map((t) => ({ type: t.type as InterviewType, count: t._count })),
       byStatus: byStatus.map((s) => ({ status: s.status as InterviewStatus, count: s._count })),
       averageScore: scoreAgg._avg.overallScore ?? 0,
-      noShowRate: totalInterviews > 0 ? Math.round((noShowCount / totalInterviews) * 100) : 0,
-      completionRate: totalInterviews > 0 ? Math.round((completedCount / totalInterviews) * 100) : 0,
+      averageDuration: durationAgg._avg.duration ?? 0,
+      upcomingCount: upcoming,
+      completionRate: total > 0 ? Math.round((completedCount / total) * 100) : 0,
+      noShowRate: total > 0 ? Math.round((noShowCount / total) * 100) : 0,
       averageTimeToSchedule: 0,
-      upcomingInterviews: upcomingCount,
     };
   }
 
-  // ─── Helper Methods ────────────────────────────────────────────────────────
+  async getUpcomingInterviews(
+    firmId: string,
+    days = 7
+  ): Promise<Interview[]> {
+    const futureDate = new Date();
+    futureDate.setDate(futureDate.getDate() + days);
 
-  private buildWhereClause(firmId: string, filters?: InterviewFilter) {
+    const interviews = await prisma.interview.findMany({
+      where: {
+        job: { firmId },
+        status: { in: ["SCHEDULED", "RESCHEDULED"] },
+        scheduledAt: {
+          gte: new Date(),
+          lte: futureDate,
+        },
+      },
+      include: {
+        panelMembers: {
+          include: {
+            user: { select: { id: true, name: true, email: true, image: true } },
+          },
+        },
+        application: {
+          select: {
+            id: true,
+            candidate: { select: { firstName: true, lastName: true, email: true } },
+          },
+        },
+      },
+      orderBy: { scheduledAt: "asc" },
+    });
+
+    return interviews.map((i) => this.formatInterview(i));
+  }
+
+  // ─── Private Helpers ────────────────────────────────────────────────────────
+
+  private buildWhereClause(firmId: string, filters?: InterviewFilter): Record<string, unknown> {
     const where: Record<string, unknown> = {
       job: { firmId },
     };
 
     if (!filters) return where;
 
-    if (filters.applicationId) where.applicationId = filters.applicationId;
     if (filters.jobId) where.jobId = filters.jobId;
     if (filters.candidateId) where.candidateId = filters.candidateId;
-    if (filters.type?.length) where.type = { in: filters.type };
-    if (filters.status?.length) where.status = { in: filters.status };
+    if (filters.applicationId) where.applicationId = filters.applicationId;
+    if (filters.type && filters.type.length > 0) {
+      where.type = { in: filters.type };
+    }
+    if (filters.status && filters.status.length > 0) {
+      where.status = { in: filters.status };
+    }
     if (filters.panelMemberId) {
-      where.panelMembers = { some: { userId: filters.panelMemberId } };
+      where.panelMembers = {
+        some: { userId: filters.panelMemberId },
+      };
     }
     if (filters.dateRange) {
       where.scheduledAt = {
@@ -836,43 +871,94 @@ export class InterviewService {
         lte: filters.dateRange.end,
       };
     }
+    if (filters.search) {
+      where.OR = [
+        { title: { contains: filters.search, mode: "insensitive" } },
+        {
+          application: {
+            candidate: {
+              firstName: { contains: filters.search, mode: "insensitive" },
+            },
+          },
+        },
+      ];
+    }
 
     return where;
   }
 
-  private formatInterview(interview: any): Interview {
+  private formatInterview(raw: any): Interview {
     return {
-      ...interview,
-      panelMembers: (interview.panelMembers ?? []).map((pm: any) => ({
+      id: raw.id,
+      applicationId: raw.applicationId,
+      jobId: raw.jobId,
+      candidateId: raw.candidateId,
+      type: raw.type,
+      status: raw.status,
+      title: raw.title,
+      description: raw.description,
+      scheduledAt: raw.scheduledAt,
+      duration: raw.duration,
+      location: raw.location,
+      meetingUrl: raw.meetingUrl,
+      meetingId: raw.meetingId,
+      meetingPassword: raw.meetingPassword,
+      panelMembers: (raw.panelMembers ?? []).map((pm: any) => ({
         id: pm.id,
         userId: pm.userId,
-        name: pm.user?.name ?? "Unknown",
+        name: pm.user?.name ?? "",
         email: pm.user?.email ?? "",
         image: pm.user?.image ?? null,
         role: pm.role,
-        scorecard: pm.scorecard,
+        scorecard: pm.scorecard
+          ? {
+              ...pm.scorecard,
+              strengths: pm.scorecard.strengths
+                ? JSON.parse(pm.scorecard.strengths)
+                : [],
+              weaknesses: pm.scorecard.weaknesses
+                ? JSON.parse(pm.scorecard.weaknesses)
+                : [],
+            }
+          : null,
       })),
-      scorecard: interview.scorecard ? {
-        ...interview.scorecard,
-        strengths: typeof interview.scorecard.strengths === "string"
-          ? JSON.parse(interview.scorecard.strengths)
-          : interview.scorecard.strengths,
-        weaknesses: typeof interview.scorecard.weaknesses === "string"
-          ? JSON.parse(interview.scorecard.weaknesses)
-          : interview.scorecard.weaknesses,
-      } : null,
-      notes: (interview.notes ?? []).map((n: any) => ({
+      scorecard: raw.scorecard
+        ? {
+            ...raw.scorecard,
+            strengths: raw.scorecard.strengths
+              ? JSON.parse(raw.scorecard.strengths)
+              : [],
+            weaknesses: raw.scorecard.weaknesses
+              ? JSON.parse(raw.scorecard.weaknesses)
+              : [],
+          }
+        : null,
+      notes: (raw.notes ?? []).map((n: any) => ({
         id: n.id,
         content: n.content,
         authorId: n.authorId,
-        authorName: n.author?.name ?? "Unknown",
-        authorImage: n.author?.image ?? null,
+        authorName: n.author?.name ?? "",
         isPrivate: n.isPrivate,
         createdAt: n.createdAt,
       })),
-      metadata: interview.metadata
-        ? (typeof interview.metadata === "string" ? JSON.parse(interview.metadata) : interview.metadata)
-        : null,
+      feedback: (raw.feedback ?? []).map((f: any) => ({
+        id: f.id,
+        panelMemberId: f.panelMemberId,
+        panelMemberName: f.panelMember?.user?.name ?? "",
+        scorecard: f.scorecard ?? null,
+        comments: f.comments,
+        submittedAt: f.submittedAt,
+      })),
+      overallScore: raw.overallScore,
+      recommendation: raw.recommendation,
+      scheduledBy: raw.scheduledBy,
+      scheduledByName: raw.scheduledByName ?? "",
+      rescheduledFrom: raw.rescheduledFrom,
+      cancelReason: raw.cancelReason,
+      noShowReason: raw.noShowReason,
+      metadata: raw.metadata,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
     };
   }
 }

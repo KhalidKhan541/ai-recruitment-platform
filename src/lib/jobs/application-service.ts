@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { AppError } from "@/lib/errors";
 import {
   ApplicationStatus,
   CandidateApplicationSummary,
@@ -6,7 +7,7 @@ import {
 
 // ─── Application Service ─────────────────────────────────────────────────────
 // Manages the full lifecycle of job applications: submission, status
-// transitions, internal notes, and pipeline stage tracking.
+// transitions, internal notes, pipeline tracking, and candidate communications.
 
 export interface Application {
   id: string;
@@ -28,6 +29,16 @@ export interface Application {
   withdrawnAt: Date | null;
   withdrawnReason: string | null;
   metadata: Record<string, unknown> | null;
+  job?: { id: string; title: string; department?: string; location?: string };
+  candidate?: {
+    id: string;
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone?: string;
+    headline?: string;
+    profileImage?: string | null;
+  };
   createdAt: Date;
   updatedAt: Date;
 }
@@ -88,16 +99,31 @@ export interface ApplicationStats {
   topJobs: { jobId: string; jobTitle: string; applicationCount: number }[];
 }
 
+export interface BulkActionInput {
+  applicationIds: string[];
+  action: "move_to_stage" | "reject" | "archive";
+  targetStatus?: ApplicationStatus;
+  reason?: string;
+}
+
+export interface CandidateApplicationSummary {
+  candidateId: string;
+  candidateName: string;
+  candidateEmail: string;
+  totalApplications: number;
+  activeApplications: number;
+  avgMatchScore: number;
+  lastAppliedAt: Date;
+}
+
 export class ApplicationService {
   // ─── CRUD Operations ───────────────────────────────────────────────────────
 
   async create(input: CreateApplicationInput): Promise<Application> {
-    // Validate job exists and is open
     const job = await prisma.job.findUnique({ where: { id: input.jobId } });
-    if (!job) throw new Error("Job not found");
-    if (job.status !== "OPEN") throw new Error("Job is not accepting applications");
+    if (!job) throw AppError.notFound("Job");
+    if (job.status !== "OPEN") throw AppError.badRequest("Job is not accepting applications");
 
-    // Check for duplicate application
     const existing = await prisma.application.findFirst({
       where: {
         jobId: input.jobId,
@@ -105,36 +131,35 @@ export class ApplicationService {
         isActive: true,
       },
     });
-    if (existing) throw new Error("Candidate has already applied for this job");
+    if (existing) throw AppError.conflict("Candidate has already applied for this job");
 
-    // Evaluate screening answers if provided
+    const candidate = await prisma.candidate.findUnique({
+      where: { id: input.candidateId },
+    });
+    if (!candidate) throw AppError.notFound("Candidate");
+
     let screeningPassed: boolean | null = null;
     let screeningScore: number | null = null;
 
     if (input.screeningAnswers && Object.keys(input.screeningAnswers).length > 0) {
-      const questions = await prisma.screeningQuestion.findMany({
-        where: { jobId: input.jobId },
-      });
-
-      const details = questions.map((q) => {
-        const answer = input.screeningAnswers![q.id];
-        if (!answer) return { passed: false, score: 0 };
-
-        const passed = q.passingAnswer
-          ? answer.toLowerCase().trim() === q.passingAnswer.toLowerCase().trim()
-          : true;
-
-        return {
-          passed,
-          score: passed ? q.weight : 0,
-        };
-      });
-
-      const totalWeight = questions.reduce((sum, q) => sum + q.weight, 0);
-      const earnedWeight = details.reduce((sum, d) => sum + d.score, 0);
-      screeningScore = totalWeight > 0 ? Math.round((earnedWeight / totalWeight) * 100) : 0;
-      screeningPassed = details.every((d) => d.passed);
+      const screeningResult = await this.evaluateScreeningAnswers(
+        input.jobId,
+        input.screeningAnswers
+      );
+      screeningPassed = screeningResult.passed;
+      screeningScore = screeningResult.score;
     }
+
+    const initialHistory: StatusHistoryEntry[] = [
+      {
+        from: null,
+        to: screeningPassed === false ? "REJECTED" : "SUBMITTED",
+        changedBy: input.candidateId,
+        changedByName: `${candidate.firstName} ${candidate.lastName}`,
+        reason: "Application submitted",
+        timestamp: new Date(),
+      },
+    ];
 
     const application = await prisma.application.create({
       data: {
@@ -147,16 +172,7 @@ export class ApplicationService {
         screeningPassed,
         screeningScore,
         lastStatusChangeAt: new Date(),
-        statusHistory: JSON.stringify([
-          {
-            from: null,
-            to: "SUBMITTED",
-            changedBy: input.candidateId,
-            changedByName: "System",
-            reason: "Application submitted",
-            timestamp: new Date().toISOString(),
-          },
-        ]),
+        statusHistory: JSON.stringify(initialHistory),
       },
       include: {
         job: { select: { id: true, title: true } },
@@ -164,13 +180,11 @@ export class ApplicationService {
       },
     });
 
-    // Increment job application count
     await prisma.job.update({
       where: { id: input.jobId },
       data: { applicationCount: { increment: 1 } },
     });
 
-    // Increment candidate application count
     await prisma.candidate.update({
       where: { id: input.candidateId },
       data: { applicationCount: { increment: 1 } },
@@ -200,6 +214,12 @@ export class ApplicationService {
     });
 
     return application ? this.formatApplication(application) : null;
+  }
+
+  async getByIdOrThrow(applicationId: string): Promise<Application> {
+    const app = await this.getById(applicationId);
+    if (!app) throw AppError.notFound("Application");
+    return app;
   }
 
   async getAll(
@@ -243,141 +263,6 @@ export class ApplicationService {
     };
   }
 
-  async getByJob(
-    jobId: string,
-    page = 1,
-    limit = 20
-  ): Promise<{ applications: Application[]; total: number }> {
-    const skip = (page - 1) * limit;
-
-    const [applications, total] = await Promise.all([
-      prisma.application.findMany({
-        where: { jobId, isActive: true },
-        include: {
-          candidate: {
-            select: {
-              id: true, firstName: true, lastName: true, email: true,
-              profileImage: true, headline: true,
-            },
-          },
-          notes: {
-            include: {
-              author: { select: { id: true, name: true, image: true } },
-            },
-            orderBy: { createdAt: "desc" },
-            take: 1,
-          },
-        },
-        skip,
-        take: limit,
-        orderBy: [
-          { matchScore: "desc" },
-          { createdAt: "desc" },
-        ],
-      }),
-      prisma.application.count({ where: { jobId, isActive: true } }),
-    ]);
-
-    return {
-      applications: applications.map((a) => this.formatApplication(a)),
-      total,
-    };
-  }
-
-  async getByCandidate(candidateId: string): Promise<Application[]> {
-    const applications = await prisma.application.findMany({
-      where: { candidateId, isActive: true },
-      include: {
-        job: {
-          select: {
-            id: true, title: true, department: true, location: true,
-            status: true, type: true, experienceLevel: true,
-          },
-        },
-        notes: {
-          include: {
-            author: { select: { id: true, name: true, image: true } },
-          },
-          orderBy: { createdAt: "desc" },
-          take: 1,
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    return applications.map((a) => this.formatApplication(a));
-  }
-
-  async update(applicationId: string, input: UpdateApplicationInput): Promise<Application> {
-    const existing = await prisma.application.findUnique({
-      where: { id: applicationId },
-    });
-    if (!existing) throw new Error("Application not found");
-
-    const data: Record<string, unknown> = {};
-    const history: StatusHistoryEntry[] = JSON.parse(existing.statusHistory as string || "[]");
-
-    if (input.status !== undefined && input.status !== existing.status) {
-      data.status = input.status;
-      data.lastStatusChangeAt = new Date();
-
-      history.push({
-        from: existing.status,
-        to: input.status,
-        changedBy: "system",
-        changedByName: "System",
-        reason: input.rejectedReason ?? input.withdrawnReason ?? null,
-        timestamp: new Date().toISOString(),
-      });
-
-      if (input.status === "REJECTED") {
-        data.rejectedAt = new Date();
-        data.rejectedReason = input.rejectedReason ?? null;
-      }
-      if (input.status === "WITHDRAWN") {
-        data.withdrawnAt = new Date();
-        data.withdrawnReason = input.withdrawnReason ?? null;
-      }
-      if (input.status === "HIRED") {
-        await prisma.candidate.update({
-          where: { id: existing.candidateId },
-          data: { status: "HIRED" },
-        });
-        await prisma.job.update({
-          where: { id: existing.jobId },
-          data: { filledCount: { increment: 1 } },
-        });
-      }
-    }
-
-    if (input.coverLetter !== undefined) data.coverLetter = input.coverLetter;
-    if (input.resumeUrl !== undefined) data.resumeUrl = input.resumeUrl;
-    if (input.matchScore !== undefined) data.matchScore = input.matchScore;
-    data.statusHistory = JSON.stringify(history);
-
-    const updated = await prisma.application.update({
-      where: { id: applicationId },
-      data,
-      include: {
-        job: { select: { id: true, title: true, department: true } },
-        candidate: {
-          select: {
-            id: true, firstName: true, lastName: true, email: true,
-            profileImage: true, headline: true,
-          },
-        },
-        notes: {
-          include: {
-            author: { select: { id: true, name: true, image: true } },
-          },
-          orderBy: { createdAt: "desc" },
-        },
-      },
-    });
-
-    return this.formatApplication(updated);
-  }
-
   async updateStatus(
     applicationId: string,
     newStatus: ApplicationStatus,
@@ -385,30 +270,106 @@ export class ApplicationService {
     changedByName: string,
     reason?: string
   ): Promise<Application> {
-    return this.update(applicationId, {
+    const application = await this.getByIdOrThrow(applicationId);
+    const validTransitions = this.getValidTransitions(application.status);
+
+    if (!validTransitions.includes(newStatus)) {
+      throw AppError.badRequest(
+        `Cannot transition from ${application.status} to ${newStatus}`
+      );
+    }
+
+    const historyEntry: StatusHistoryEntry = {
+      from: application.status,
+      to: newStatus,
+      changedBy,
+      changedByName,
+      reason: reason ?? null,
+      timestamp: new Date(),
+    };
+
+    const currentHistory = application.statusHistory ?? [];
+    const updatedHistory = [...currentHistory, historyEntry];
+
+    const updateData: Record<string, unknown> = {
       status: newStatus,
-      rejectedReason: reason,
+      lastStatusChangeAt: new Date(),
+      statusHistory: JSON.stringify(updatedHistory),
+    };
+
+    if (newStatus === "REJECTED") {
+      updateData.rejectedAt = new Date();
+      updateData.rejectedReason = reason;
+    }
+    if (newStatus === "WITHDRAWN") {
+      updateData.withdrawnAt = new Date();
+      updateData.withdrawnReason = reason;
+    }
+
+    const updated = await prisma.application.update({
+      where: { id: applicationId },
+      data: updateData,
+      include: {
+        job: { select: { id: true, title: true } },
+        candidate: {
+          select: { id: true, firstName: true, lastName: true, email: true },
+        },
+        notes: {
+          include: {
+            author: { select: { id: true, name: true, image: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        },
+      },
     });
+
+    if (newStatus === "HIRED") {
+      await prisma.job.update({
+        where: { id: application.jobId },
+        data: { filledCount: { increment: 1 } },
+      });
+    }
+
+    return this.formatApplication(updated);
   }
 
-  async delete(applicationId: string): Promise<void> {
-    const existing = await prisma.application.findUnique({ where: { id: applicationId } });
-    if (!existing) throw new Error("Application not found");
+  async withdraw(
+    applicationId: string,
+    candidateId: string,
+    reason?: string
+  ): Promise<Application> {
+    const application = await this.getByIdOrThrow(applicationId);
 
-    await prisma.application.delete({ where: { id: applicationId } });
+    if (application.candidateId !== candidateId) {
+      throw AppError.forbidden("Only the candidate can withdraw their application");
+    }
 
-    await prisma.job.update({
-      where: { id: existing.jobId },
-      data: { applicationCount: { decrement: 1 } },
-    });
+    if (!["SUBMITTED", "UNDER_REVIEW", "SHORTLISTED"].includes(application.status)) {
+      throw AppError.badRequest("Cannot withdraw application at this stage");
+    }
 
-    await prisma.candidate.update({
-      where: { id: existing.candidateId },
-      data: { applicationCount: { decrement: 1 } },
-    });
+    return this.updateStatus(
+      applicationId,
+      "WITHDRAWN",
+      candidateId,
+      "Candidate",
+      reason
+    );
   }
 
-  // ─── Notes ─────────────────────────────────────────────────────────────────
+  async reject(
+    applicationId: string,
+    rejectedBy: string,
+    rejectedByName: string,
+    reason: string
+  ): Promise<Application> {
+    if (!reason || reason.trim().length < 5) {
+      throw AppError.badRequest("A rejection reason is required (minimum 5 characters)");
+    }
+    return this.updateStatus(applicationId, "REJECTED", rejectedBy, rejectedByName, reason);
+  }
+
+  // ─── Notes Management ───────────────────────────────────────────────────────
 
   async addNote(
     applicationId: string,
@@ -417,11 +378,17 @@ export class ApplicationService {
     content: string,
     isPrivate = false
   ): Promise<ApplicationNote> {
+    await this.getByIdOrThrow(applicationId);
+
+    if (!content || content.trim().length === 0) {
+      throw AppError.badRequest("Note content cannot be empty");
+    }
+
     const note = await prisma.applicationNote.create({
       data: {
         applicationId,
         authorId,
-        content,
+        content: content.trim(),
         isPrivate,
       },
       include: {
@@ -440,33 +407,55 @@ export class ApplicationService {
     };
   }
 
-  async updateNote(noteId: string, content: string): Promise<ApplicationNote> {
-    const note = await prisma.applicationNote.update({
+  async updateNote(
+    noteId: string,
+    authorId: string,
+    content: string
+  ): Promise<ApplicationNote> {
+    const existing = await prisma.applicationNote.findUnique({
       where: { id: noteId },
-      data: { content },
+    });
+    if (!existing) throw AppError.notFound("Note");
+    if (existing.authorId !== authorId) {
+      throw AppError.forbidden("Only the author can edit their note");
+    }
+
+    const updated = await prisma.applicationNote.update({
+      where: { id: noteId },
+      data: { content: content.trim() },
       include: {
         author: { select: { id: true, name: true, image: true } },
       },
     });
 
     return {
-      id: note.id,
-      content: note.content,
-      authorId: note.authorId,
-      authorName: note.author?.name ?? "Unknown",
-      authorImage: note.author?.image ?? null,
-      isPrivate: note.isPrivate,
-      createdAt: note.createdAt,
+      id: updated.id,
+      content: updated.content,
+      authorId: updated.authorId,
+      authorName: updated.author?.name ?? "",
+      authorImage: updated.author?.image ?? null,
+      isPrivate: updated.isPrivate,
+      createdAt: updated.createdAt,
     };
   }
 
-  async deleteNote(noteId: string): Promise<void> {
+  async deleteNote(noteId: string, authorId: string, isAdmin = false): Promise<void> {
+    const existing = await prisma.applicationNote.findUnique({
+      where: { id: noteId },
+    });
+    if (!existing) throw AppError.notFound("Note");
+    if (existing.authorId !== authorId && !isAdmin) {
+      throw AppError.forbidden("Only the author or an admin can delete notes");
+    }
+
     await prisma.applicationNote.delete({ where: { id: noteId } });
   }
 
   async getNotes(applicationId: string, includePrivate = false): Promise<ApplicationNote[]> {
     const where: Record<string, unknown> = { applicationId };
-    if (!includePrivate) where.isPrivate = false;
+    if (!includePrivate) {
+      where.isPrivate = false;
+    }
 
     const notes = await prisma.applicationNote.findMany({
       where,
@@ -480,35 +469,110 @@ export class ApplicationService {
       id: n.id,
       content: n.content,
       authorId: n.authorId,
-      authorName: n.author?.name ?? "Unknown",
+      authorName: n.author?.name ?? "",
       authorImage: n.author?.image ?? null,
       isPrivate: n.isPrivate,
       createdAt: n.createdAt,
     }));
   }
 
-  // ─── Status Tracking & Pipeline ────────────────────────────────────────────
+  // ─── Screening ──────────────────────────────────────────────────────────────
 
-  async getStatusHistory(applicationId: string): Promise<StatusHistoryEntry[]> {
-    const application = await prisma.application.findUnique({
-      where: { id: applicationId },
-      select: { statusHistory: true },
+  async evaluateScreeningAnswers(
+    jobId: string,
+    answers: Record<string, string>
+  ): Promise<{ passed: boolean; score: number; details: Array<{ questionId: string; passed: boolean; score: number }> }> {
+    const questions = await prisma.screeningQuestion.findMany({
+      where: { jobId },
     });
 
-    if (!application) throw new Error("Application not found");
+    if (questions.length === 0) {
+      return { passed: true, score: 100, details: [] };
+    }
 
-    const history: StatusHistoryEntry[] = JSON.parse(application.statusHistory as string || "[]");
-    return history;
+    const details = questions.map((q) => {
+      const answer = answers[q.id];
+      if (!answer) {
+        return { questionId: q.id, passed: !q.required, score: 0 };
+      }
+
+      const passed = q.passingAnswer
+        ? answer.toLowerCase().trim() === q.passingAnswer.toLowerCase().trim()
+        : true;
+
+      return {
+        questionId: q.id,
+        passed,
+        score: passed ? q.weight : 0,
+      };
+    });
+
+    const totalWeight = questions.reduce((sum, q) => sum + q.weight, 0);
+    const earnedWeight = details.reduce((sum, d) => sum + d.score, 0);
+    const score = totalWeight > 0 ? Math.round((earnedWeight / totalWeight) * 100) : 0;
+    const requiredQuestions = questions.filter((q) => q.required);
+    const passed = requiredQuestions.every((q) =>
+      details.find((d) => d.questionId === q.id)?.passed
+    );
+
+    return { passed, score, details };
   }
 
+  // ─── Bulk Operations ────────────────────────────────────────────────────────
+
+  async bulkAction(
+    input: BulkActionInput,
+    performedBy: string,
+    performedByName: string
+  ): Promise<{ processed: number; failed: string[] }> {
+    const failed: string[] = [];
+    let processed = 0;
+
+    for (const applicationId of input.applicationIds) {
+      try {
+        switch (input.action) {
+          case "move_to_stage":
+            if (input.targetStatus) {
+              await this.updateStatus(
+                applicationId,
+                input.targetStatus,
+                performedBy,
+                performedByName,
+                input.reason
+              );
+            }
+            break;
+          case "reject":
+            await this.reject(
+              applicationId,
+              performedBy,
+              performedByName,
+              input.reason ?? "Bulk rejection"
+            );
+            break;
+          case "archive":
+            await this.updateStatus(
+              applicationId,
+              "ARCHIVED",
+              performedBy,
+              performedByName,
+              input.reason
+            );
+            break;
+        }
+        processed++;
+      } catch {
+        failed.push(applicationId);
+      }
+    }
+
+    return { processed, failed };
+  }
+
+  // ─── Pipeline & Analytics ───────────────────────────────────────────────────
+
   async getApplicationStats(firmId: string): Promise<ApplicationStats> {
-    const [
-      totalApplications,
-      byStatus,
-      scoreAgg,
-      hiredCount,
-      totalCount,
-    ] = await Promise.all([
+    const [total, byStatus, matchScores, topJobs] = await Promise.all([
       prisma.application.count({
         where: { job: { firmId }, isActive: true },
       }),
@@ -521,97 +585,151 @@ export class ApplicationService {
         where: { job: { firmId }, isActive: true, matchScore: { not: null } },
         _avg: { matchScore: true },
       }),
-      prisma.application.count({
-        where: { job: { firmId }, status: "HIRED" },
-      }),
-      prisma.application.count({
+      prisma.application.groupBy({
+        by: ["jobId"],
         where: { job: { firmId }, isActive: true },
+        _count: true,
+        orderBy: { _count: { jobId: "desc" } },
+        take: 5,
       }),
     ]);
 
-    const topJobs = await prisma.application.groupBy({
-      by: ["jobId"],
-      where: { job: { firmId }, isActive: true },
-      _count: true,
-      orderBy: { _count: { jobId: "desc" } },
-      take: 5,
-    });
+    const hiredCount = byStatus.find((s) => s.status === "HIRED")?._count ?? 0;
+    const conversionRate = total > 0 ? Math.round((hiredCount / total) * 100) : 0;
 
-    const jobTitles = await prisma.job.findMany({
-      where: { id: { in: topJobs.map((j) => j.jobId) } },
+    const jobIds = topJobs.map((t) => t.jobId);
+    const jobs = await prisma.job.findMany({
+      where: { id: { in: jobIds } },
       select: { id: true, title: true },
     });
 
-    const jobTitleMap = new Map(jobTitles.map((j) => [j.id, j.title]));
-
     return {
-      totalApplications,
+      totalApplications: total,
       byStatus: byStatus.map((s) => ({
         status: s.status as ApplicationStatus,
         count: s._count,
       })),
-      averageMatchScore: scoreAgg._avg.matchScore ?? 0,
-      conversionRate: totalCount > 0 ? Math.round((hiredCount / totalCount) * 100) : 0,
+      averageMatchScore: matchScores._avg.matchScore ?? 0,
+      conversionRate,
       averageTimeInStage: [],
-      topJobs: topJobs.map((j) => ({
-        jobId: j.jobId,
-        jobTitle: jobTitleMap.get(j.jobId) ?? "Unknown",
-        applicationCount: j._count,
+      topJobs: topJobs.map((t) => ({
+        jobId: t.jobId,
+        jobTitle: jobs.find((j) => j.id === t.jobId)?.title ?? "Unknown",
+        applicationCount: t._count,
       })),
     };
   }
 
-  async bulkUpdateStatus(
-    applicationIds: string[],
-    newStatus: ApplicationStatus,
-    changedBy: string,
-    changedByName: string,
-    reason?: string
-  ): Promise<Application[]> {
-    const results: Application[] = [];
-
-    for (const id of applicationIds) {
-      try {
-        const updated = await this.update(id, {
-          status: newStatus,
-          rejectedReason: reason,
-        });
-        results.push(updated);
-      } catch {
-        // Skip failed updates
-      }
-    }
-
-    return results;
-  }
-
-  async rejectInactive(
-    jobId: string,
-    daysSinceApplication = 30
-  ): Promise<number> {
-    const cutoffDate = new Date();
-    cutoffDate.setDate(cutoffDate.getDate() - daysSinceApplication);
-
-    const result = await prisma.application.updateMany({
-      where: {
-        jobId,
-        status: "SUBMITTED",
-        createdAt: { lt: cutoffDate },
-        isActive: true,
-      },
-      data: {
-        status: "REJECTED",
-        rejectedAt: new Date(),
-        rejectedReason: "Automatically rejected: no activity within threshold period",
-      },
+  async getCandidateApplicationsSummary(firmId: string): Promise<CandidateApplicationSummary[]> {
+    const applications = await prisma.application.groupBy({
+      by: ["candidateId"],
+      where: { job: { firmId }, isActive: true },
+      _count: true,
+      _avg: { matchScore: true },
+      orderBy: { _count: { candidateId: "desc" } },
+      take: 20,
     });
 
-    return result.count;
+    const candidateIds = applications.map((a) => a.candidateId);
+    const candidates = await prisma.candidate.findMany({
+      where: { id: { in: candidateIds } },
+      select: { id: true, firstName: true, lastName: true, email: true },
+    });
+
+    return applications.map((a) => {
+      const candidate = candidates.find((c) => c.id === a.candidateId);
+      return {
+        candidateId: a.candidateId,
+        candidateName: candidate
+          ? `${candidate.firstName} ${candidate.lastName}`
+          : "Unknown",
+        candidateEmail: candidate?.email ?? "",
+        totalApplications: a._count,
+        activeApplications: a._count,
+        avgMatchScore: a._avg.matchScore ?? 0,
+        lastAppliedAt: new Date(),
+      };
+    });
   }
 
-  // ─── Helper Methods ────────────────────────────────────────────────────────
+  async getApplicationsByJob(
+    jobId: string,
+    page = 1,
+    limit = 20
+  ): Promise<{ applications: Application[]; total: number }> {
+    const skip = (page - 1) * limit;
 
-  private buildWhereClause(firmId: string, filters?: ApplicationFilter) {
+    const [applications, total] = await Promise.all([
+      prisma.application.findMany({
+        where: { jobId, isActive: true },
+        include: {
+          candidate: {
+            select: {
+              id: true, firstName: true, lastName: true, email: true,
+              headline: true, profileImage: true,
+            },
+          },
+          notes: {
+            include: {
+              author: { select: { id: true, name: true, image: true } },
+            },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
+        },
+        skip,
+        take: limit,
+        orderBy: { matchScore: "desc" },
+      }),
+      prisma.application.count({ where: { jobId, isActive: true } }),
+    ]);
+
+    return {
+      applications: applications.map((a) => this.formatApplication(a)),
+      total,
+    };
+  }
+
+  async getShortlistedCandidates(jobId: string): Promise<Application[]> {
+    const applications = await prisma.application.findMany({
+      where: {
+        jobId,
+        isActive: true,
+        status: { in: ["SHORTLISTED", "INTERVIEWING", "OFFERED"] },
+      },
+      include: {
+        candidate: {
+          select: {
+            id: true, firstName: true, lastName: true, email: true,
+            phone: true, headline: true, profileImage: true,
+          },
+        },
+        job: { select: { id: true, title: true } },
+      },
+      orderBy: { matchScore: "desc" },
+    });
+
+    return applications.map((a) => this.formatApplication(a));
+  }
+
+  // ─── Private Helpers ────────────────────────────────────────────────────────
+
+  private getValidTransitions(currentStatus: ApplicationStatus): ApplicationStatus[] {
+    const transitions: Record<ApplicationStatus, ApplicationStatus[]> = {
+      SUBMITTED: ["UNDER_REVIEW", "REJECTED", "WITHDRAWN", "ARCHIVED"],
+      UNDER_REVIEW: ["SHORTLISTED", "REJECTED", "WITHDRAWN", "ARCHIVED"],
+      SHORTLISTED: ["INTERVIEWING", "REJECTED", "WITHDRAWN", "ARCHIVED"],
+      INTERVIEWING: ["SHORTLISTED", "OFFERED", "REJECTED", "ARCHIVED"],
+      OFFERED: ["HIRED", "REJECTED", "WITHDRAWN", "ARCHIVED"],
+      HIRED: [],
+      REJECTED: ["UNDER_REVIEW"],
+      WITHDRAWN: ["SUBMITTED"],
+      ARCHIVED: ["UNDER_REVIEW"],
+    };
+    return transitions[currentStatus] ?? [];
+  }
+
+  private buildWhereClause(firmId: string, filters?: ApplicationFilter): Record<string, unknown> {
     const where: Record<string, unknown> = {
       job: { firmId },
       isActive: true,
@@ -621,7 +739,9 @@ export class ApplicationService {
 
     if (filters.jobId) where.jobId = filters.jobId;
     if (filters.candidateId) where.candidateId = filters.candidateId;
-    if (filters.status?.length) where.status = { in: filters.status };
+    if (filters.status && filters.status.length > 0) {
+      where.status = { in: filters.status };
+    }
     if (filters.minMatchScore !== undefined) {
       where.matchScore = { ...(where.matchScore as object ?? {}), gte: filters.minMatchScore };
     }
@@ -629,45 +749,75 @@ export class ApplicationService {
       where.matchScore = { ...(where.matchScore as object ?? {}), lte: filters.maxMatchScore };
     }
     if (filters.dateRange) {
-      where.createdAt = { gte: filters.dateRange.start, lte: filters.dateRange.end };
+      where.createdAt = {
+        gte: filters.dateRange.start,
+        lte: filters.dateRange.end,
+      };
+    }
+    if (filters.search) {
+      where.OR = [
+        {
+          candidate: {
+            firstName: { contains: filters.search, mode: "insensitive" },
+          },
+        },
+        {
+          candidate: {
+            lastName: { contains: filters.search, mode: "insensitive" },
+          },
+        },
+        {
+          candidate: {
+            email: { contains: filters.search, mode: "insensitive" },
+          },
+        },
+      ];
     }
 
     return where;
   }
 
-  private formatApplication(app: any): Application {
+  private formatApplication(raw: any): Application {
+    const history = raw.statusHistory
+      ? typeof raw.statusHistory === "string"
+        ? JSON.parse(raw.statusHistory)
+        : raw.statusHistory
+      : [];
+
     return {
-      id: app.id,
-      jobId: app.jobId,
-      candidateId: app.candidateId,
-      status: app.status,
-      coverLetter: app.coverLetter,
-      resumeUrl: app.resumeUrl,
-      matchScore: app.matchScore,
-      screeningAnswers: app.screeningAnswers
-        ? (typeof app.screeningAnswers === "string" ? JSON.parse(app.screeningAnswers) : app.screeningAnswers)
+      id: raw.id,
+      jobId: raw.jobId,
+      candidateId: raw.candidateId,
+      status: raw.status,
+      coverLetter: raw.coverLetter,
+      resumeUrl: raw.resumeUrl,
+      matchScore: raw.matchScore,
+      screeningAnswers: raw.screeningAnswers
+        ? JSON.parse(raw.screeningAnswers)
         : null,
-      screeningPassed: app.screeningPassed,
-      screeningScore: app.screeningScore,
-      notes: (app.notes ?? []).map((n: any) => ({
+      screeningPassed: raw.screeningPassed,
+      screeningScore: raw.screeningScore,
+      notes: (raw.notes ?? []).map((n: any) => ({
         id: n.id,
         content: n.content,
         authorId: n.authorId,
-        authorName: n.author?.name ?? "Unknown",
+        authorName: n.author?.name ?? "",
         authorImage: n.author?.image ?? null,
         isPrivate: n.isPrivate,
         createdAt: n.createdAt,
       })),
-      statusHistory: typeof app.statusHistory === "string" ? JSON.parse(app.statusHistory) : (app.statusHistory ?? []),
-      appliedAt: app.createdAt,
-      lastStatusChangeAt: app.lastStatusChangeAt ?? app.updatedAt,
-      rejectedAt: app.rejectedAt,
-      rejectedReason: app.rejectedReason,
-      withdrawnAt: app.withdrawnAt,
-      withdrawnReason: app.withdrawnReason,
-      metadata: app.metadata ? (typeof app.metadata === "string" ? JSON.parse(app.metadata) : app.metadata) : null,
-      createdAt: app.createdAt,
-      updatedAt: app.updatedAt,
+      statusHistory: history,
+      appliedAt: raw.createdAt,
+      lastStatusChangeAt: raw.lastStatusChangeAt,
+      rejectedAt: raw.rejectedAt,
+      rejectedReason: raw.rejectedReason,
+      withdrawnAt: raw.withdrawnAt,
+      withdrawnReason: raw.withdrawnReason,
+      metadata: raw.metadata,
+      job: raw.job,
+      candidate: raw.candidate,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
     };
   }
 }

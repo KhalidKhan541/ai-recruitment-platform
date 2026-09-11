@@ -6,47 +6,30 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const updateJobSchema = z.object({
   title: z.string().min(1).max(200).optional(),
-  department: z.string().min(1).max(100).optional(),
-  team: z.string().optional(),
+  description: z.string().min(50).optional(),
+  requirements: z.string().optional(),
+  responsibilities: z.string().optional(),
+  department: z.string().max(100).optional(),
   location: z.string().min(1).max(200).optional(),
   isRemote: z.boolean().optional(),
-  type: z.enum(["full_time", "part_time", "contract", "internship", "temporary", "remote", "freelance"]).optional(),
-  experienceLevel: z.enum(["entry", "mid", "senior", "lead", "executive"]).optional(),
-  employmentType: z.enum(["permanent", "temporary", "contract", "internship", "apprenticeship"]).optional(),
-  description: z.string().min(50).optional(),
-  requirements: z.array(z.string()).optional(),
-  responsibilities: z.array(z.string()).optional(),
-  niceToHaves: z.array(z.string()).optional(),
-  salary: z
-    .object({
-      min: z.number().min(0),
-      max: z.number().min(0),
-      currency: z.string().default("USD"),
-      period: z.enum(["hourly", "daily", "weekly", "monthly", "yearly"]).default("yearly"),
-      isNegotiable: z.boolean().default(false),
-    })
+  employmentType: z
+    .enum(["full_time", "part_time", "contract", "internship", "temporary", "remote", "freelance"])
     .optional(),
-  benefits: z.record(z.any()).optional(),
-  requiredSkills: z.array(z.record(z.any())).optional(),
-  screeningQuestions: z.array(z.any()).optional(),
-  status: z.enum(["draft", "open", "on_hold", "closed", "archived", "cancelled"]).optional(),
-  priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
-  headcount: z.number().min(1).optional(),
-  closingDate: z.string().datetime().optional().nullable(),
+  experienceLevel: z
+    .enum(["ENTRY", "JUNIOR", "MID", "SENIOR", "LEAD", "EXECUTIVE"])
+    .optional(),
+  educationLevel: z
+    .enum(["HIGH_SCHOOL", "ASSOCIATE", "BACHELOR", "MASTER", "DOCTORATE", "NONE"])
+    .optional(),
+  salaryMin: z.number().min(0).optional().nullable(),
+  salaryMax: z.number().min(0).optional().nullable(),
+  salaryCurrency: z.string().optional(),
+  vacancies: z.number().min(1).optional(),
+  status: z.enum(["DRAFT", "PUBLISHED", "PAUSED", "CLOSED", "ARCHIVED"]).optional(),
+  applicationDeadline: z.string().datetime().optional().nullable(),
+  screeningQuestions: z.array(z.string()).optional(),
   tags: z.array(z.string()).optional(),
-  recruiterId: z.string().optional().nullable(),
 });
-
-async function getJobById(id: string) {
-  return prisma.job.findUnique({
-    where: { id },
-    include: {
-      hiringManager: { select: { id: true, name: true, email: true, avatar: true } },
-      recruiter: { select: { id: true, name: true, email: true, avatar: true } },
-      _count: { select: { applications: true, interviews: true } },
-    },
-  });
-}
 
 export async function GET(
   _request: NextRequest,
@@ -58,15 +41,27 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const job = await getJobById(params.id);
+    const job = await prisma.jobPosting.findUnique({
+      where: { id: params.id },
+      include: {
+        company: { select: { id: true, name: true, logoUrl: true, website: true } },
+        applications: {
+          select: { id: true, status: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+          take: 10,
+        },
+        interviews: {
+          select: { id: true, status: true, scheduledAt: true },
+          orderBy: { scheduledAt: "desc" },
+          take: 10,
+        },
+        _count: { select: { applications: true, interviews: true, offers: true } },
+      },
+    });
+
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
-
-    await prisma.job.update({
-      where: { id: params.id },
-      data: { viewCount: { increment: 1 } },
-    });
 
     return NextResponse.json({ data: job });
   } catch (error) {
@@ -85,16 +80,15 @@ export async function PUT(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const existingJob = await prisma.job.findUnique({ where: { id: params.id } });
+    const existingJob = await prisma.jobPosting.findUnique({
+      where: { id: params.id },
+    });
+
     if (!existingJob) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    if (
-      existingJob.hiringManagerId !== session.user.id &&
-      existingJob.recruiterId !== session.user.id &&
-      session.user.role !== "admin"
-    ) {
+    if (existingJob.companyId !== session.user.companyId && session.user.role !== "ADMIN") {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
@@ -102,19 +96,25 @@ export async function PUT(
     const validated = updateJobSchema.parse(body);
 
     const updateData: any = { ...validated };
-    if (validated.closingDate !== undefined) {
-      updateData.closingDate = validated.closingDate ? new Date(validated.closingDate) : null;
+    if (validated.applicationDeadline !== undefined) {
+      updateData.applicationDeadline = validated.applicationDeadline
+        ? new Date(validated.applicationDeadline)
+        : null;
     }
-    if (validated.status === "open" && existingJob.status !== "open") {
+
+    if (validated.status === "PUBLISHED" && existingJob.status !== "PUBLISHED") {
       updateData.publishedAt = new Date();
     }
 
-    const job = await prisma.job.update({
+    if (validated.status === "CLOSED" && existingJob.status !== "CLOSED") {
+      updateData.closedAt = new Date();
+    }
+
+    const job = await prisma.jobPosting.update({
       where: { id: params.id },
       data: updateData,
       include: {
-        hiringManager: { select: { id: true, name: true, email: true, avatar: true } },
-        recruiter: { select: { id: true, name: true, email: true, avatar: true } },
+        company: { select: { id: true, name: true, logoUrl: true } },
         _count: { select: { applications: true, interviews: true } },
       },
     });
@@ -142,7 +142,7 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const job = await prisma.job.findUnique({
+    const job = await prisma.jobPosting.findUnique({
       where: { id: params.id },
       include: { _count: { select: { applications: true } } },
     });
@@ -151,19 +151,19 @@ export async function DELETE(
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    if (job.hiringManagerId !== session.user.id && session.user.role !== "admin") {
+    if (job.companyId !== session.user.companyId && session.user.role !== "ADMIN") {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
     if (job._count.applications > 0) {
-      await prisma.job.update({
+      await prisma.jobPosting.update({
         where: { id: params.id },
-        data: { status: "archived" },
+        data: { status: "ARCHIVED" },
       });
       return NextResponse.json({ message: "Job archived (has existing applications)" });
     }
 
-    await prisma.job.delete({ where: { id: params.id } });
+    await prisma.jobPosting.delete({ where: { id: params.id } });
     return NextResponse.json({ message: "Job deleted successfully" });
   } catch (error) {
     console.error("DELETE /api/jobs/[id] error:", error);

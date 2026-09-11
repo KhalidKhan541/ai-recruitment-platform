@@ -13,30 +13,29 @@ export async function POST(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (!["admin", "recruiter", "hiring_manager"].includes(session.user.role)) {
+    if (!["ADMIN", "RECRUITER", "HIRING_MANAGER"].includes(session.user.role)) {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
-    const job = await prisma.job.findUnique({
+    const job = await prisma.jobPosting.findUnique({
       where: { id: params.id },
-      include: { hiringManager: { select: { id: true } } },
     });
 
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    if (job.hiringManagerId !== session.user.id && session.user.role !== "admin") {
+    if (job.companyId !== session.user.companyId && session.user.role !== "ADMIN") {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
-    if (job.status === "open") {
+    if (job.status === "PUBLISHED") {
       return NextResponse.json({ error: "Job is already published" }, { status: 400 });
     }
 
-    if (job.status === "cancelled") {
+    if (job.status === "CLOSED" || job.status === "ARCHIVED") {
       return NextResponse.json(
-        { error: "Cannot publish a cancelled job. Create a new one instead." },
+        { error: "Cannot publish a closed or archived job" },
         { status: 400 }
       );
     }
@@ -48,29 +47,14 @@ export async function POST(
       );
     }
 
-    if (!job.requirements || (job.requirements as string[]).length === 0) {
-      return NextResponse.json(
-        { error: "At least one requirement is needed to publish" },
-        { status: 400 }
-      );
-    }
-
-    if (!job.responsibilities || (job.responsibilities as string[]).length === 0) {
-      return NextResponse.json(
-        { error: "At least one responsibility is needed to publish" },
-        { status: 400 }
-      );
-    }
-
-    const updatedJob = await prisma.job.update({
+    const updatedJob = await prisma.jobPosting.update({
       where: { id: params.id },
       data: {
-        status: "open",
+        status: "PUBLISHED",
         publishedAt: new Date(),
       },
       include: {
-        hiringManager: { select: { id: true, name: true, email: true, avatar: true } },
-        recruiter: { select: { id: true, name: true, email: true, avatar: true } },
+        company: { select: { id: true, name: true, logoUrl: true } },
         _count: { select: { applications: true, interviews: true } },
       },
     });

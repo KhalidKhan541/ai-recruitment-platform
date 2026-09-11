@@ -5,24 +5,25 @@ import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const createOfferSchema = z.object({
-  applicationId: z.string().min(1),
-  candidateId: z.string().min(1),
-  salary: z.object({
-    amount: z.number().min(0),
-    currency: z.string().default("USD"),
-    period: z.enum(["hourly", "daily", "weekly", "monthly", "yearly"]).default("yearly"),
-    bonus: z.number().optional(),
-    equity: z.string().optional(),
+  applicationId: z.string().uuid(),
+  candidateId: z.string().uuid(),
+  jobOffer: z.object({
+    title: z.string().min(1).max(200),
+    salary: z.number().min(0),
+    salaryCurrency: z.string().default("USD"),
+    salaryFrequency: z.enum(["hourly", "daily", "weekly", "monthly", "yearly"]).default("yearly"),
+    equityPercentage: z.number().min(0).max(100).optional(),
+    signingBonus: z.number().min(0).optional(),
+    relocationBonus: z.number().min(0).optional(),
+    startDate: z.string().datetime(),
+    expirationDate: z.string().datetime(),
+    employmentType: z.string(),
+    workLocation: z.string(),
+    workArrangement: z.enum(["remote", "hybrid", "onsite"]).default("hybrid"),
+    benefits: z.array(z.string()).optional(),
+    terms: z.string().optional(),
+    notes: z.string().optional(),
   }),
-  startDate: z.string().datetime(),
-  expirationDate: z.string().datetime(),
-  terms: z.string().min(10, "Please provide terms and conditions"),
-  notes: z.string().optional(),
-  benefits: z.array(z.string()).optional(),
-  signingBonus: z.number().optional(),
-  relocationAssistance: z.number().optional(),
-  ptoDays: z.number().optional(),
-  metadata: z.record(z.any()).optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -37,27 +38,35 @@ export async function GET(request: NextRequest) {
     const limit = Math.min(parseInt(searchParams.get("limit") || "20"), 100);
     const status = searchParams.get("status") || undefined;
     const candidateId = searchParams.get("candidateId") || undefined;
-    const applicationId = searchParams.get("applicationId") || undefined;
     const sortBy = searchParams.get("sortBy") || "createdAt";
-    const sortOrder = searchParams.get("sortOrder") || "desc";
+    const sortOrder = (searchParams.get("sortOrder") || "desc") as "asc" | "desc";
 
     const where: any = {};
 
     if (status) where.status = status;
     if (candidateId) where.candidateId = candidateId;
-    if (applicationId) where.applicationId = applicationId;
+
+    if (session.user.companyId) {
+      where.job = { companyId: session.user.companyId };
+    }
 
     const [offers, total] = await Promise.all([
       prisma.offer.findMany({
         where,
         include: {
-          candidate: { select: { id: true, name: true, email: true, avatar: true, title: true } },
-          application: {
+          candidate: {
             include: {
-              job: { select: { id: true, title: true, department: true } },
+              user: { select: { id: true, name: true, email: true, avatarUrl: true } },
             },
           },
-          createdBy: { select: { id: true, name: true, email: true } },
+          jobPosting: {
+            select: { id: true, title: true, department: true, location: true },
+          },
+          application: {
+            select: { id: true, status: true },
+          },
+          jobOffer: true,
+          documents: true,
         },
         orderBy: { [sortBy]: sortOrder },
         skip: (page - 1) * limit,
@@ -86,78 +95,81 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (!["admin", "recruiter", "hiring_manager"].includes(session.user.role)) {
+    if (!["ADMIN", "RECRUITER", "HIRING_MANAGER"].includes(session.user.role)) {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
     const body = await request.json();
     const validated = createOfferSchema.parse(body);
 
-    const application = await prisma.application.findUnique({
+    const application = await prisma.jobApplication.findUnique({
       where: { id: validated.applicationId },
-      include: {
-        job: { select: { id: true, title: true } },
-        offers: { where: { status: { in: ["draft", "pending_approval", "sent", "negotiating"] } } },
-      },
     });
 
     if (!application) {
       return NextResponse.json({ error: "Application not found" }, { status: 404 });
     }
 
-    if (application.offers.length > 0) {
+    if (application.candidateId !== validated.candidateId) {
       return NextResponse.json(
-        { error: "An active offer already exists for this application" },
+        { error: "Candidate does not match application" },
+        { status: 400 }
+      );
+    }
+
+    const existingActiveOffer = await prisma.offer.findFirst({
+      where: {
+        candidateId: validated.candidateId,
+        jobId: application.jobId,
+        status: { in: ["DRAFT", "PENDING_APPROVAL", "SENT", "NEGOTIATING"] },
+      },
+    });
+
+    if (existingActiveOffer) {
+      return NextResponse.json(
+        { error: "An active offer already exists for this candidate" },
         { status: 409 }
       );
     }
 
-    const candidate = await prisma.candidate.findUnique({
-      where: { id: validated.candidateId },
-    });
-
-    if (!candidate) {
-      return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
-    }
-
     const offer = await prisma.offer.create({
       data: {
-        applicationId: validated.applicationId,
+        jobId: application.jobId,
         candidateId: validated.candidateId,
-        createdById: session.user.id,
-        salary: validated.salary,
-        startDate: new Date(validated.startDate),
-        expirationDate: new Date(validated.expirationDate),
-        terms: validated.terms,
-        notes: validated.notes,
-        status: "draft",
-        metadata: {
-          benefits: validated.benefits,
-          signingBonus: validated.signingBonus,
-          relocationAssistance: validated.relocationAssistance,
-          ptoDays: validated.ptoDays,
-          ...validated.metadata,
+        approvedById: session.user.id,
+        status: "DRAFT",
+        jobOffer: {
+          create: {
+            title: validated.jobOffer.title,
+            salary: validated.jobOffer.salary,
+            salaryCurrency: validated.jobOffer.salaryCurrency,
+            salaryFrequency: validated.jobOffer.salaryFrequency,
+            equityPercentage: validated.jobOffer.equityPercentage,
+            signingBonus: validated.jobOffer.signingBonus,
+            relocationBonus: validated.jobOffer.relocationBonus,
+            startDate: new Date(validated.jobOffer.startDate),
+            expirationDate: new Date(validated.jobOffer.expirationDate),
+            employmentType: validated.jobOffer.employmentType,
+            workLocation: validated.jobOffer.workLocation,
+            workArrangement: validated.jobOffer.workArrangement,
+            benefits: validated.jobOffer.benefits || [],
+            terms: validated.jobOffer.terms,
+            notes: validated.jobOffer.notes,
+          },
         },
       },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        application: { include: { job: { select: { id: true, title: true } } } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
+        jobPosting: { select: { id: true, title: true } },
+        jobOffer: true,
       },
     });
 
-    await prisma.application.update({
+    await prisma.jobApplication.update({
       where: { id: validated.applicationId },
-      data: { status: "offer_pending" },
-    });
-
-    await prisma.timelineEvent.create({
-      data: {
-        type: "offer_sent",
-        title: "Offer letter created",
-        description: `Offer for ${candidate.name} - ${(validated.salary as any).amount} ${(validated.salary as any).currency}/${(validated.salary as any).period}`,
-        metadata: { offerId: offer.id, salary: validated.salary },
-        applicationId: validated.applicationId,
-      },
+      data: { status: "OFFERED" },
     });
 
     return NextResponse.json({ data: offer }, { status: 201 });

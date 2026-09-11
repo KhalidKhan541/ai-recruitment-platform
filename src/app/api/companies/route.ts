@@ -8,10 +8,16 @@ const createCompanySchema = z.object({
   name: z.string().min(1).max(200).trim(),
   description: z.string().max(2000).optional(),
   website: z.string().url().optional().or(z.literal("")),
-  logo: z.string().url().optional().or(z.literal("")),
   industry: z.string().max(100).optional(),
-  size: z.string().optional(),
-  location: z.string().max(200).optional(),
+  size: z.string().max(50).optional(),
+  logoUrl: z.string().url().optional().or(z.literal("")),
+  address: z.string().max(500).optional(),
+  city: z.string().max(100).optional(),
+  state: z.string().max(100).optional(),
+  country: z.string().max(100).optional(),
+  zipCode: z.string().max(20).optional(),
+  phone: z.string().max(20).optional(),
+  email: z.string().email().optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -27,7 +33,7 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get("search") || undefined;
     const industry = searchParams.get("industry") || undefined;
     const sortBy = searchParams.get("sortBy") || "name";
-    const sortOrder = searchParams.get("sortOrder") || "asc";
+    const sortOrder = (searchParams.get("sortOrder") || "asc") as "asc" | "desc";
 
     const where: any = {};
 
@@ -43,7 +49,7 @@ export async function GET(request: NextRequest) {
       where.industry = { contains: industry, mode: "insensitive" };
     }
 
-    if (session.user.companyId) {
+    if (session.user.role !== "ADMIN" && session.user.companyId) {
       where.id = session.user.companyId;
     }
 
@@ -51,7 +57,10 @@ export async function GET(request: NextRequest) {
       prisma.company.findMany({
         where,
         include: {
-          _count: { select: { users: true, jobs: true, talentPools: true } },
+          owner: { select: { id: true, name: true, email: true } },
+          _count: {
+            select: { users: true, jobPostings: true, candidates: true, recruiters: true },
+          },
         },
         orderBy: { [sortBy]: sortOrder },
         skip: (page - 1) * limit,
@@ -80,17 +89,19 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (session.user.role !== "admin") {
+    if (!["ADMIN"].includes(session.user.role)) {
       return NextResponse.json({ error: "Only admins can create companies" }, { status: 403 });
     }
 
     const body = await request.json();
     const validated = createCompanySchema.parse(body);
 
-    const existing = await prisma.company.findFirst({
-      where: { name: { equals: validated.name, mode: "insensitive" } },
-    });
+    const slug = validated.name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "");
 
+    const existing = await prisma.company.findUnique({ where: { slug } });
     if (existing) {
       return NextResponse.json(
         { error: "A company with this name already exists" },
@@ -101,21 +112,26 @@ export async function POST(request: NextRequest) {
     const company = await prisma.company.create({
       data: {
         name: validated.name,
+        slug,
         description: validated.description,
         website: validated.website || null,
-        logo: validated.logo || null,
         industry: validated.industry,
         size: validated.size,
-        location: validated.location,
+        logoUrl: validated.logoUrl || null,
+        address: validated.address,
+        city: validated.city,
+        state: validated.state,
+        country: validated.country,
+        zipCode: validated.zipCode,
+        phone: validated.phone,
+        email: validated.email,
+        ownerId: session.user.id,
       },
       include: {
-        _count: { select: { users: true, jobs: true, talentPools: true } },
+        _count: {
+          select: { users: true, jobPostings: true, candidates: true, recruiters: true },
+        },
       },
-    });
-
-    await prisma.user.update({
-      where: { id: session.user.id },
-      data: { companyId: company.id },
     });
 
     return NextResponse.json({ data: company }, { status: 201 });

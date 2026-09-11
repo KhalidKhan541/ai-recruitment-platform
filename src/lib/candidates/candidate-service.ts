@@ -1,4 +1,5 @@
 import { prisma } from "@/lib/prisma";
+import { AppError } from "@/lib/errors";
 import {
   Candidate,
   CandidateWithDetails,
@@ -12,17 +13,16 @@ import {
 
 // ─── Candidate Service ───────────────────────────────────────────────────────
 // Manages candidate profiles, resume storage, experience tracking,
-// skill inventories, and recruitment pipeline engagement.
+// skill inventories, recruitment pipeline engagement, and talent sourcing.
 
 export class CandidateService {
   // ─── CRUD Operations ───────────────────────────────────────────────────────
 
   async create(input: CreateCandidateInput): Promise<CandidateWithDetails> {
-    // Check for duplicate email
     const existing = await prisma.candidate.findFirst({
       where: { email: input.email, firmId: input.firmId, isActive: true },
     });
-    if (existing) throw new Error("A candidate with this email already exists");
+    if (existing) throw AppError.conflict("A candidate with this email already exists");
 
     const candidate = await prisma.candidate.create({
       data: {
@@ -61,18 +61,15 @@ export class CandidateService {
         skills: true,
         resumes: true,
         applications: {
-          select: {
-            id: true,
-            jobId: true,
-            status: true,
-            createdAt: true,
-            matchScore: true,
-            job: { select: { title: true } },
+          include: {
+            job: { select: { id: true, title: true, department: true } },
           },
+          orderBy: { createdAt: "desc" },
         },
         certifications: true,
+        assessments: true,
         _count: {
-          select: { applications: true, interviews: true, offers: true },
+          select: { applications: true, interviews: true },
         },
       },
     });
@@ -85,32 +82,19 @@ export class CandidateService {
       where: { id: candidateId },
       include: {
         skills: true,
-        resumes: true,
+        resumes: {
+          orderBy: { createdAt: "desc" },
+        },
         applications: {
-          select: {
-            id: true,
-            jobId: true,
-            status: true,
-            createdAt: true,
-            matchScore: true,
-            job: { select: { title: true } },
+          include: {
+            job: { select: { id: true, title: true, department: true, location: true } },
           },
           orderBy: { createdAt: "desc" },
         },
         certifications: true,
-        assessments: {
-          select: {
-            id: true,
-            name: true,
-            score: true,
-            maxScore: true,
-            status: true,
-            completedAt: true,
-          },
-          orderBy: { completedAt: "desc" },
-        },
+        assessments: true,
         _count: {
-          select: { applications: true, interviews: true, offers: true },
+          select: { applications: true, interviews: true },
         },
       },
     });
@@ -118,27 +102,10 @@ export class CandidateService {
     return candidate ? this.formatCandidateWithDetails(candidate) : null;
   }
 
-  async getByEmail(email: string, firmId: string): Promise<CandidateWithDetails | null> {
-    const candidate = await prisma.candidate.findFirst({
-      where: { email, firmId, isActive: true },
-      include: {
-        skills: true,
-        resumes: true,
-        applications: {
-          select: {
-            id: true, jobId: true, status: true, createdAt: true,
-            matchScore: true, job: { select: { title: true } },
-          },
-          orderBy: { createdAt: "desc" },
-        },
-        certifications: true,
-        _count: {
-          select: { applications: true, interviews: true, offers: true },
-        },
-      },
-    });
-
-    return candidate ? this.formatCandidateWithDetails(candidate) : null;
+  async getByIdOrThrow(candidateId: string): Promise<CandidateWithDetails> {
+    const candidate = await this.getById(candidateId);
+    if (!candidate) throw AppError.notFound("Candidate");
+    return candidate;
   }
 
   async getAll(
@@ -155,18 +122,14 @@ export class CandidateService {
         where,
         include: {
           skills: true,
-          resumes: true,
+          resumes: { take: 1, orderBy: { createdAt: "desc" } },
           applications: {
-            select: {
-              id: true, jobId: true, status: true, createdAt: true,
-              matchScore: true, job: { select: { title: true } },
-            },
-            take: 3,
+            select: { id: true, status: true, createdAt: true },
             orderBy: { createdAt: "desc" },
+            take: 3,
           },
-          certifications: true,
           _count: {
-            select: { applications: true, interviews: true, offers: true },
+            select: { applications: true, interviews: true },
           },
         },
         skip,
@@ -182,9 +145,26 @@ export class CandidateService {
     };
   }
 
-  async update(candidateId: string, input: UpdateCandidateInput): Promise<CandidateWithDetails> {
-    const existing = await prisma.candidate.findUnique({ where: { id: candidateId } });
-    if (!existing) throw new Error("Candidate not found");
+  async update(
+    candidateId: string,
+    input: UpdateCandidateInput
+  ): Promise<CandidateWithDetails> {
+    const existing = await prisma.candidate.findUnique({
+      where: { id: candidateId },
+    });
+    if (!existing) throw AppError.notFound("Candidate");
+
+    if (input.email && input.email !== existing.email) {
+      const duplicate = await prisma.candidate.findFirst({
+        where: {
+          email: input.email,
+          firmId: existing.firmId,
+          id: { not: candidateId },
+          isActive: true,
+        },
+      });
+      if (duplicate) throw AppError.conflict("A candidate with this email already exists");
+    }
 
     const data: Record<string, unknown> = {};
 
@@ -199,27 +179,31 @@ export class CandidateService {
     if (input.headline !== undefined) data.headline = input.headline;
     if (input.summary !== undefined) data.summary = input.summary;
     if (input.status !== undefined) data.status = input.status;
-    if (input.notes !== undefined) data.notes = input.notes;
+    if (input.source !== undefined) data.source = input.source;
     if (input.education !== undefined) data.education = JSON.stringify(input.education);
     if (input.experience !== undefined) data.experience = JSON.stringify(input.experience);
     if (input.projects !== undefined) data.projects = JSON.stringify(input.projects);
     if (input.links !== undefined) data.links = JSON.stringify(input.links);
-    if (input.preferences !== undefined) data.preferences = input.preferences ? JSON.stringify(input.preferences) : null;
+    if (input.preferences !== undefined) {
+      data.preferences = input.preferences ? JSON.stringify(input.preferences) : null;
+    }
     if (input.tags !== undefined) data.tags = JSON.stringify(input.tags);
 
     if (input.skills !== undefined) {
       await prisma.candidateSkill.deleteMany({ where: { candidateId } });
-      await prisma.candidateSkill.createMany({
-        data: input.skills.map((skill) => ({
-          candidateId,
-          skillName: skill.skillName,
-          level: skill.level,
-          yearsExperience: skill.yearsExperience ?? null,
-          lastUsed: skill.lastUsed ?? null,
-          isVerified: skill.isVerified ?? false,
-          endorsements: skill.endorsements ?? 0,
-        })),
-      });
+      if (input.skills.length > 0) {
+        await prisma.candidateSkill.createMany({
+          data: input.skills.map((skill) => ({
+            candidateId,
+            skillName: skill.skillName,
+            level: skill.level,
+            yearsExperience: skill.yearsExperience ?? null,
+            lastUsed: skill.lastUsed ?? null,
+            isVerified: skill.isVerified ?? false,
+            endorsements: skill.endorsements ?? 0,
+          })),
+        });
+      }
     }
 
     const updated = await prisma.candidate.update({
@@ -229,14 +213,15 @@ export class CandidateService {
         skills: true,
         resumes: true,
         applications: {
-          select: {
-            id: true, jobId: true, status: true, createdAt: true,
-            matchScore: true, job: { select: { title: true } },
+          include: {
+            job: { select: { id: true, title: true, department: true } },
           },
+          orderBy: { createdAt: "desc" },
         },
         certifications: true,
+        assessments: true,
         _count: {
-          select: { applications: true, interviews: true, offers: true },
+          select: { applications: true, interviews: true },
         },
       },
     });
@@ -245,124 +230,96 @@ export class CandidateService {
   }
 
   async delete(candidateId: string): Promise<void> {
-    const existing = await prisma.candidate.findUnique({ where: { id: candidateId } });
-    if (!existing) throw new Error("Candidate not found");
-
-    // Soft delete - mark as archived
-    await prisma.candidate.update({
+    const candidate = await prisma.candidate.findUnique({
       where: { id: candidateId },
-      data: { status: "ARCHIVED", isActive: false },
+      select: { id: true, applicationCount: true },
     });
-  }
+    if (!candidate) throw AppError.notFound("Candidate");
 
-  async hardDelete(candidateId: string): Promise<void> {
+    if (candidate.applicationCount > 0) {
+      throw AppError.badRequest(
+        "Cannot delete a candidate with existing applications. Archive them instead."
+      );
+    }
+
+    await prisma.candidateSkill.deleteMany({ where: { candidateId } });
     await prisma.candidate.delete({ where: { id: candidateId } });
   }
 
-  // ─── Profile Management ────────────────────────────────────────────────────
+  async archive(candidateId: string): Promise<CandidateWithDetails> {
+    return this.update(candidateId, { status: "ARCHIVED" as CandidateStatus });
+  }
 
-  async updateProfile(
-    candidateId: string,
-    profile: {
-      headline?: string;
-      summary?: string;
-      location?: string;
-      city?: string;
-      country?: string;
-      timezone?: string;
-      phone?: string;
-      links?: { type: string; url: string; label: string | null }[];
-    }
-  ): Promise<CandidateWithDetails> {
-    return this.update(candidateId, {
-      headline: profile.headline,
-      summary: profile.summary,
-      location: profile.location,
-      city: profile.city,
-      country: profile.country,
-      timezone: profile.timezone,
-      phone: profile.phone,
-      links: profile.links as any,
+  // ─── Search ─────────────────────────────────────────────────────────────────
+
+  async search(
+    firmId: string,
+    query: string,
+    page = 1,
+    limit = 20
+  ): Promise<{ candidates: CandidateWithDetails[]; total: number }> {
+    const where = {
+      firmId,
+      isActive: true,
+      OR: [
+        { firstName: { contains: query, mode: "insensitive" as const } },
+        { lastName: { contains: query, mode: "insensitive" as const } },
+        { email: { contains: query, mode: "insensitive" as const } },
+        { headline: { contains: query, mode: "insensitive" as const } },
+        { summary: { contains: query, mode: "insensitive" as const } },
+        {
+          skills: {
+            some: { skillName: { contains: query, mode: "insensitive" as const } },
+          },
+        },
+      ],
+    };
+
+    const skip = (page - 1) * limit;
+    const [candidates, total] = await Promise.all([
+      prisma.candidate.findMany({
+        where,
+        include: {
+          skills: true,
+          resumes: { take: 1, orderBy: { createdAt: "desc" } },
+          _count: { select: { applications: true, interviews: true } },
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.candidate.count({ where }),
+    ]);
+
+    return {
+      candidates: candidates.map((c) => this.formatCandidateWithDetails(c)),
+      total,
+    };
+  }
+
+  async getByEmail(email: string, firmId: string): Promise<CandidateWithDetails | null> {
+    const candidate = await prisma.candidate.findFirst({
+      where: { email, firmId, isActive: true },
+      include: {
+        skills: true,
+        resumes: true,
+        applications: {
+          include: {
+            job: { select: { id: true, title: true } },
+          },
+        },
+        certifications: true,
+        assessments: true,
+        _count: {
+          select: { applications: true, interviews: true },
+        },
+      },
     });
+
+    return candidate ? this.formatCandidateWithDetails(candidate) : null;
   }
 
-  async updateExperience(
-    candidateId: string,
-    experience: {
-      company: string;
-      title: string;
-      location: string | null;
-      startDate: Date;
-      endDate: Date | null;
-      isCurrent: boolean;
-      description: string;
-      achievements: string[];
-      skills: string[];
-    }[]
-  ): Promise<CandidateWithDetails> {
-    return this.update(candidateId, { experience: experience as any });
-  }
-
-  async updateEducation(
-    candidateId: string,
-    education: {
-      institution: string;
-      degree: string;
-      fieldOfStudy: string;
-      startDate: Date;
-      endDate: Date | null;
-      gpa: number | null;
-      honors: string[];
-      activities: string[];
-    }[]
-  ): Promise<CandidateWithDetails> {
-    return this.update(candidateId, { education: education as any });
-  }
-
-  async addTag(candidateId: string, tag: string): Promise<CandidateWithDetails> {
-    const candidate = await prisma.candidate.findUnique({
-      where: { id: candidateId },
-      select: { tags: true },
-    });
-    if (!candidate) throw new Error("Candidate not found");
-
-    const currentTags: string[] = typeof candidate.tags === "string"
-      ? JSON.parse(candidate.tags as string)
-      : candidate.tags ?? [];
-
-    if (!currentTags.includes(tag)) {
-      currentTags.push(tag);
-    }
-
-    return this.update(candidateId, { tags: currentTags });
-  }
-
-  async removeTag(candidateId: string, tag: string): Promise<CandidateWithDetails> {
-    const candidate = await prisma.candidate.findUnique({
-      where: { id: candidateId },
-      select: { tags: true },
-    });
-    if (!candidate) throw new Error("Candidate not found");
-
-    const currentTags: string[] = typeof candidate.tags === "string"
-      ? JSON.parse(candidate.tags as string)
-      : candidate.tags ?? [];
-
-    return this.update(candidateId, {
-      tags: currentTags.filter((t) => t !== tag),
-    });
-  }
-
-  async updateLastActive(candidateId: string): Promise<void> {
-    await prisma.candidate.update({
-      where: { id: candidateId },
-      data: { lastActiveAt: new Date() },
-    });
-  }
-
-  // ─── Search & Discovery ────────────────────────────────────────────────────
-
-  async searchBySkills(
+  async getBySkills(
     firmId: string,
     skillNames: string[],
     minLevel?: string
@@ -382,124 +339,73 @@ export class CandidateService {
       where,
       include: {
         skills: true,
-        resumes: true,
-        applications: {
-          select: {
-            id: true, jobId: true, status: true, createdAt: true,
-            matchScore: true, job: { select: { title: true } },
-          },
-          take: 3,
-          orderBy: { createdAt: "desc" },
-        },
-        certifications: true,
-        _count: {
-          select: { applications: true, interviews: true, offers: true },
-        },
+        _count: { select: { applications: true } },
       },
-      take: 50,
-    });
-
-    return candidates.map((c) => this.formatCandidateWithDetails(c));
-  }
-
-  async searchByExperience(
-    firmId: string,
-    query: string
-  ): Promise<CandidateWithDetails[]> {
-    const candidates = await prisma.candidate.findMany({
-      where: {
-        firmId,
-        isActive: true,
-        OR: [
-          { headline: { contains: query, mode: "insensitive" } },
-          { summary: { contains: query, mode: "insensitive" } },
-          { firstName: { contains: query, mode: "insensitive" } },
-          { lastName: { contains: query, mode: "insensitive" } },
-        ],
-      },
-      include: {
-        skills: true,
-        resumes: true,
-        applications: {
-          select: {
-            id: true, jobId: true, status: true, createdAt: true,
-            matchScore: true, job: { select: { title: true } },
-          },
-          take: 3,
-          orderBy: { createdAt: "desc" },
-        },
-        certifications: true,
-        _count: {
-          select: { applications: true, interviews: true, offers: true },
-        },
-      },
-      take: 50,
-    });
-
-    return candidates.map((c) => this.formatCandidateWithDetails(c));
-  }
-
-  // ─── Engagement Tracking ───────────────────────────────────────────────────
-
-  async trackActivity(candidateId: string, activityType: string): Promise<void> {
-    await prisma.activityLog.create({
-      data: {
-        action: activityType,
-        entity: "CANDIDATE",
-        entityId: candidateId,
-      },
-    });
-
-    await this.updateLastActive(candidateId);
-  }
-
-  async getEngagementTimeline(candidateId: string): Promise<any[]> {
-    const logs = await prisma.activityLog.findMany({
-      where: { entityId: candidateId, entity: "CANDIDATE" },
       orderBy: { createdAt: "desc" },
       take: 50,
     });
 
-    return logs.map((log) => ({
-      id: log.id,
-      action: log.action,
-      entity: log.entity,
-      entityId: log.entityId,
-      oldValues: log.oldValues,
-      newValues: log.newValues,
-      timestamp: log.createdAt,
-    }));
+    return candidates.map((c) => this.formatCandidateWithDetails(c));
   }
 
-  // ─── Statistics ────────────────────────────────────────────────────────────
+  // ─── Bulk Operations ────────────────────────────────────────────────────────
+
+  async bulkUpdateStatus(
+    candidateIds: string[],
+    status: CandidateStatus
+  ): Promise<{ updated: number; failed: string[] }> {
+    const failed: string[] = [];
+    let updated = 0;
+
+    for (const id of candidateIds) {
+      try {
+        await this.update(id, { status });
+        updated++;
+      } catch {
+        failed.push(id);
+      }
+    }
+
+    return { updated, failed };
+  }
+
+  async bulkAddTags(candidateIds: string[], tags: string[]): Promise<{ updated: number }> {
+    const result = await prisma.candidate.updateMany({
+      where: { id: { in: candidateIds } },
+      data: { updatedAt: new Date() },
+    });
+
+    for (const id of candidateIds) {
+      const candidate = await prisma.candidate.findUnique({
+        where: { id },
+        select: { tags: true },
+      });
+      if (candidate) {
+        const existingTags = JSON.parse(candidate.tags ?? "[]");
+        const newTags = [...new Set([...existingTags, ...tags])];
+        await prisma.candidate.update({
+          where: { id },
+          data: { tags: JSON.stringify(newTags) },
+        });
+      }
+    }
+
+    return { updated: result.count };
+  }
+
+  // ─── Analytics ──────────────────────────────────────────────────────────────
 
   async getStats(firmId: string): Promise<CandidateStats> {
-    const [
-      totalCandidates,
-      activeCandidates,
-      newThisMonth,
-      byStatus,
-      topSkills,
-      sourceBreakdown,
-      scoreAgg,
-    ] = await Promise.all([
-      prisma.candidate.count({
-        where: { firmId, isActive: true },
-      }),
-      prisma.candidate.count({
-        where: { firmId, status: "ACTIVE" },
-      }),
-      prisma.candidate.count({
-        where: {
-          firmId,
-          createdAt: {
-            gte: new Date(new Date().setDate(1)),
-          },
-        },
-      }),
+    const [total, byStatus, bySource, skillStats] = await Promise.all([
+      prisma.candidate.count({ where: { firmId, isActive: true } }),
       prisma.candidate.groupBy({
         by: ["status"],
         where: { firmId, isActive: true },
+        _count: true,
+      }),
+      prisma.candidate.groupBy({
+        by: ["source"],
+        where: { firmId, isActive: true, source: { not: null } },
         _count: true,
       }),
       prisma.candidateSkill.groupBy({
@@ -509,41 +415,34 @@ export class CandidateService {
         orderBy: { _count: { skillName: "desc" } },
         take: 10,
       }),
-      prisma.candidate.groupBy({
-        by: ["source"],
-        where: { firmId, isActive: true, source: { not: null } },
-        _count: true,
-        orderBy: { _count: { source: "desc" } },
-        take: 10,
-      }),
-      prisma.application.aggregate({
-        where: { candidate: { firmId }, matchScore: { not: null } },
-        _avg: { matchScore: true },
-      }),
     ]);
 
+    const hiredCount = byStatus.find((s) => s.status === "HIRED")?._count ?? 0;
+
     return {
-      totalCandidates,
-      activeCandidates,
-      newThisMonth,
-      candidatesByStatus: Object.fromEntries(
-        byStatus.map((s) => [s.status, s._count])
-      ) as Record<CandidateStatus, number>,
-      topSkills: topSkills.map((s) => ({
-        skill: s.skillName,
+      total,
+      active: byStatus.find((s) => s.status === "ACTIVE")?._count ?? 0,
+      hired: hiredCount,
+      archived: byStatus.find((s) => s.status === "ARCHIVED")?._count ?? 0,
+      byStatus: byStatus.map((s) => ({
+        status: s.status as CandidateStatus,
         count: s._count,
       })),
-      sourceBreakdown: sourceBreakdown.map((s) => ({
+      bySource: bySource.map((s) => ({
         source: s.source ?? "Unknown",
         count: s._count,
       })),
-      averageMatchScore: scoreAgg._avg.matchScore ?? 0,
+      topSkills: skillStats.map((s) => ({
+        skill: s.skillName,
+        count: s._count,
+      })),
+      conversionRate: total > 0 ? Math.round((hiredCount / total) * 100) : 0,
     };
   }
 
-  // ─── Helper Methods ────────────────────────────────────────────────────────
+  // ─── Private Helpers ────────────────────────────────────────────────────────
 
-  private buildWhereClause(firmId: string, filters?: CandidateFilter) {
+  private buildWhereClause(firmId: string, filters?: CandidateFilter): Record<string, unknown> {
     const where: Record<string, unknown> = {
       firmId,
       isActive: true,
@@ -551,32 +450,35 @@ export class CandidateService {
 
     if (!filters) return where;
 
-    if (filters.status?.length) where.status = { in: filters.status };
-    if (filters.location?.length) {
-      where.OR = filters.location.map((loc) => ({
-        location: { contains: loc, mode: "insensitive" },
-      }));
+    if (filters.status && filters.status.length > 0) {
+      where.status = { in: filters.status };
     }
-    if (filters.skills?.length) {
+    if (filters.source && filters.source.length > 0) {
+      where.source = { in: filters.source };
+    }
+    if (filters.skills && filters.skills.length > 0) {
       where.skills = {
-        some: {
-          skillName: { in: filters.skills },
-        },
+        some: { skillName: { in: filters.skills } },
       };
     }
-    if (filters.source?.length) where.source = { in: filters.source };
-    if (filters.tags?.length) {
-      where.tags = { contains: JSON.stringify(filters.tags[0]), mode: "insensitive" };
+    if (filters.location) {
+      where.OR = [
+        { location: { contains: filters.location, mode: "insensitive" } },
+        { city: { contains: filters.location, mode: "insensitive" } },
+        { country: { contains: filters.location, mode: "insensitive" } },
+      ];
     }
-    if (filters.hasResume) {
-      where.resumes = { some: {} };
+    if (filters.experienceLevel) {
+      where.experienceLevel = filters.experienceLevel;
     }
-    if (filters.minMatchScore !== undefined) {
-      where.applications = {
-        some: {
-          matchScore: { gte: filters.minMatchScore },
-        },
-      };
+    if (filters.minExperience !== undefined) {
+      where.totalExperienceYears = { gte: filters.minExperience };
+    }
+    if (filters.maxExperience !== undefined) {
+      where.totalExperienceYears = { ...(where.totalExperienceYears as object ?? {}), lte: filters.maxExperience };
+    }
+    if (filters.tags && filters.tags.length > 0) {
+      where.tags = { contains: JSON.stringify(filters.tags[0]) };
     }
     if (filters.dateRange) {
       where.createdAt = {
@@ -590,37 +492,37 @@ export class CandidateService {
         { lastName: { contains: filters.search, mode: "insensitive" } },
         { email: { contains: filters.search, mode: "insensitive" } },
         { headline: { contains: filters.search, mode: "insensitive" } },
-        { summary: { contains: filters.search, mode: "insensitive" } },
       ];
     }
 
     return where;
   }
 
-  private formatCandidateWithDetails(candidate: any): CandidateWithDetails {
+  private formatCandidateWithDetails(raw: any): CandidateWithDetails {
     return {
-      ...candidate,
-      education: typeof candidate.education === "string"
-        ? JSON.parse(candidate.education)
-        : candidate.education ?? [],
-      experience: typeof candidate.experience === "string"
-        ? JSON.parse(candidate.experience)
-        : candidate.experience ?? [],
-      projects: typeof candidate.projects === "string"
-        ? JSON.parse(candidate.projects)
-        : candidate.projects ?? [],
-      links: typeof candidate.links === "string"
-        ? JSON.parse(candidate.links)
-        : candidate.links ?? [],
-      preferences: candidate.preferences
-        ? (typeof candidate.preferences === "string"
-          ? JSON.parse(candidate.preferences)
-          : candidate.preferences)
-        : null,
-      tags: typeof candidate.tags === "string"
-        ? JSON.parse(candidate.tags)
-        : candidate.tags ?? [],
-      skills: (candidate.skills ?? []).map((s: any) => ({
+      id: raw.id,
+      firstName: raw.firstName,
+      lastName: raw.lastName,
+      email: raw.email,
+      phone: raw.phone,
+      location: raw.location,
+      city: raw.city,
+      country: raw.country,
+      timezone: raw.timezone,
+      headline: raw.headline,
+      summary: raw.summary,
+      status: raw.status,
+      source: raw.source,
+      referredBy: raw.referredBy,
+      education: JSON.parse(raw.education ?? "[]"),
+      experience: JSON.parse(raw.experience ?? "[]"),
+      projects: JSON.parse(raw.projects ?? "[]"),
+      links: JSON.parse(raw.links ?? "[]"),
+      preferences: raw.preferences ? JSON.parse(raw.preferences) : null,
+      tags: JSON.parse(raw.tags ?? "[]"),
+      firmId: raw.firmId,
+      skills: (raw.skills ?? []).map((s: any) => ({
+        id: s.id,
         skillName: s.skillName,
         level: s.level,
         yearsExperience: s.yearsExperience,
@@ -628,30 +530,21 @@ export class CandidateService {
         isVerified: s.isVerified,
         endorsements: s.endorsements,
       })),
-      applications: (candidate.applications ?? []).map((a: any) => ({
+      resumes: raw.resumes ?? [],
+      applications: (raw.applications ?? []).map((a: any) => ({
         id: a.id,
         jobId: a.jobId,
-        jobTitle: a.job?.title ?? "Unknown",
         status: a.status,
-        appliedAt: a.createdAt,
         matchScore: a.matchScore,
+        appliedAt: a.createdAt,
+        job: a.job,
       })),
-      certifications: (candidate.certifications ?? []).map((c: any) => ({
-        id: c.id,
-        name: c.name,
-        issuer: c.issuer,
-        issueDate: c.issueDate,
-        expiryDate: c.expiryDate,
-        credentialId: c.credentialId,
-        credentialUrl: c.credentialUrl,
-        status: c.status,
-        skills: typeof c.skills === "string" ? JSON.parse(c.skills) : c.skills ?? [],
-      })),
-      metadata: candidate.metadata
-        ? (typeof candidate.metadata === "string"
-          ? JSON.parse(candidate.metadata)
-          : candidate.metadata)
-        : null,
+      certifications: raw.certifications ?? [],
+      assessments: raw.assessments ?? [],
+      applicationCount: raw._count?.applications ?? 0,
+      interviewCount: raw._count?.interviews ?? 0,
+      createdAt: raw.createdAt,
+      updatedAt: raw.updatedAt,
     };
   }
 }

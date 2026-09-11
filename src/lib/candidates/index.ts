@@ -34,6 +34,7 @@ export type {
   MatchJobInput,
   ResumeFilter,
   ResumeStats,
+  ATSAnalysis,
 } from "./resume-service";
 
 export type {
@@ -74,6 +75,27 @@ export const candidateProfile = {
       resumes,
       assessments,
       certifications,
+    };
+  },
+
+  async getJobReadiness(candidateId: string, jobId: string) {
+    const [candidate, currentResume, skillGap] = await Promise.all([
+      candidateService.getById(candidateId),
+      resumeService.getCurrentResume(candidateId),
+      skillService.analyzeSkillGap(candidateId, jobId),
+    ]);
+
+    let atsAnalysis = null;
+    if (currentResume) {
+      atsAnalysis = await resumeService.analyzeATS(currentResume.id);
+    }
+
+    return {
+      candidate,
+      currentResume,
+      skillGap,
+      atsAnalysis,
+      readinessScore: skillGap.length === 0 ? 100 : Math.max(0, 100 - skillGap.length * 10),
     };
   },
 };

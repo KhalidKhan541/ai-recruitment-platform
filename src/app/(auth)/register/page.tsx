@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useState } from "react";
+import { useState, useCallback } from "react";
 
 export default function RegisterPage() {
   const [formData, setFormData] = useState({
@@ -10,20 +10,21 @@ export default function RegisterPage() {
     company: "",
     password: "",
     confirmPassword: "",
+    role: "recruiter" as string,
   });
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
   const [agreed, setAgreed] = useState(false);
 
-  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     setFormData((prev) => ({
       ...prev,
       [e.target.name]: e.target.value,
     }));
-  };
+  }, []);
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
@@ -42,25 +43,22 @@ export default function RegisterPage() {
       return;
     }
 
+    if (!formData.name || !formData.email || !formData.company) {
+      setError("Please fill in all required fields");
+      return;
+    }
+
     setIsLoading(true);
 
     try {
-      // Simulate API call
       await new Promise((resolve) => setTimeout(resolve, 1500));
-
-      // Check all fields
-      if (!formData.name || !formData.email || !formData.company || !formData.password) {
-        throw new Error("Please fill in all fields");
-      }
-
-      // Redirect to dashboard on success
-      window.location.href = "/dashboard";
+      window.location.href = "/";
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Registration failed");
+      setError(err instanceof Error ? err.message : "Registration failed. Please try again.");
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [formData, agreed]);
 
   const passwordStrength = (() => {
     const { password } = formData;
@@ -89,20 +87,21 @@ export default function RegisterPage() {
 
       <form onSubmit={handleSubmit} className="space-y-5">
         {error && (
-          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
-            <div className="flex items-center gap-2">
-              <svg className="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
+          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-sm text-destructive">
+            <div className="flex items-start gap-3">
+              <svg className="mt-0.5 h-5 w-5 shrink-0" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126zM12 15.75h.007v.008H12v-.008z" />
               </svg>
-              {error}
+              <div>
+                <p className="font-medium">Registration Error</p>
+                <p className="mt-0.5 text-xs opacity-80">{error}</p>
+              </div>
             </div>
           </div>
         )}
 
         <div className="space-y-2">
-          <label htmlFor="name" className="label">
-            Full name
-          </label>
+          <label htmlFor="name" className="label">Full name</label>
           <input
             id="name"
             name="name"
@@ -117,9 +116,7 @@ export default function RegisterPage() {
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="email" className="label">
-            Work email
-          </label>
+          <label htmlFor="email" className="label">Work email</label>
           <input
             id="email"
             name="email"
@@ -134,9 +131,7 @@ export default function RegisterPage() {
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="company" className="label">
-            Company name
-          </label>
+          <label htmlFor="company" className="label">Company name</label>
           <input
             id="company"
             name="company"
@@ -151,9 +146,23 @@ export default function RegisterPage() {
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="password" className="label">
-            Password
-          </label>
+          <label htmlFor="role" className="label">Your role</label>
+          <select
+            id="role"
+            name="role"
+            value={formData.role}
+            onChange={handleChange}
+            className="input"
+          >
+            <option value="recruiter">Recruiter</option>
+            <option value="hiring_manager">Hiring Manager</option>
+            <option value="hr_admin">HR Admin</option>
+            <option value="interviewer">Interviewer</option>
+          </select>
+        </div>
+
+        <div className="space-y-2">
+          <label htmlFor="password" className="label">Password</label>
           <div className="relative">
             <input
               id="password"
@@ -169,7 +178,7 @@ export default function RegisterPage() {
             <button
               type="button"
               onClick={() => setShowPassword(!showPassword)}
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors"
               tabIndex={-1}
             >
               {showPassword ? (
@@ -190,7 +199,7 @@ export default function RegisterPage() {
                 {[1, 2, 3, 4, 5].map((level) => (
                   <div
                     key={level}
-                    className={`h-1 flex-1 rounded-full transition-colors ${
+                    className={`h-1.5 flex-1 rounded-full transition-colors duration-300 ${
                       level <= passwordStrength.score
                         ? passwordStrength.color
                         : "bg-muted"
@@ -207,9 +216,7 @@ export default function RegisterPage() {
         </div>
 
         <div className="space-y-2">
-          <label htmlFor="confirmPassword" className="label">
-            Confirm password
-          </label>
+          <label htmlFor="confirmPassword" className="label">Confirm password</label>
           <input
             id="confirmPassword"
             name="confirmPassword"
@@ -238,15 +245,15 @@ export default function RegisterPage() {
             type="checkbox"
             checked={agreed}
             onChange={(e) => setAgreed(e.target.checked)}
-            className="mt-1 h-4 w-4 rounded border-input"
+            className="mt-1 h-4 w-4 rounded border-input text-primary focus:ring-primary"
           />
           <label htmlFor="terms" className="text-sm text-muted-foreground">
             I agree to the{" "}
-            <Link href="/terms" className="text-primary hover:text-primary/80">
+            <Link href="/terms" className="text-primary hover:text-primary/80 transition-colors">
               Terms of Service
             </Link>{" "}
             and{" "}
-            <Link href="/privacy" className="text-primary hover:text-primary/80">
+            <Link href="/privacy" className="text-primary hover:text-primary/80 transition-colors">
               Privacy Policy
             </Link>
           </label>
@@ -267,13 +274,13 @@ export default function RegisterPage() {
         </button>
       </form>
 
-      <div className="mt-6">
+      <div className="mt-8">
         <div className="relative">
           <div className="absolute inset-0 flex items-center">
             <div className="w-full border-t border-border" />
           </div>
           <div className="relative flex justify-center text-sm">
-            <span className="bg-card px-2 text-muted-foreground">Or sign up with</span>
+            <span className="bg-card px-3 text-muted-foreground">Or sign up with</span>
           </div>
         </div>
 
@@ -298,7 +305,7 @@ export default function RegisterPage() {
 
       <p className="mt-8 text-center text-sm text-muted-foreground">
         Already have an account?{" "}
-        <Link href="/login" className="font-medium text-primary hover:text-primary/80">
+        <Link href="/login" className="font-medium text-primary hover:text-primary/80 transition-colors">
           Sign in
         </Link>
       </p>

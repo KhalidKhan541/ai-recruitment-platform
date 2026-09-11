@@ -1,7 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getServerSession } from "next-auth";
+import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
+
+const uploadResumeSchema = z.object({
+  title: z.string().min(1).max(200),
+  fileUrl: z.string().url(),
+  fileName: z.string().min(1).max(200),
+  fileSize: z.number().min(1),
+  mimeType: z.string(),
+  isDefault: z.boolean().default(false),
+});
 
 export async function GET(
   _request: NextRequest,
@@ -15,31 +25,36 @@ export async function GET(
 
     const candidate = await prisma.candidate.findUnique({
       where: { id: params.id },
-      select: { id: true, name: true, email: true, resume: true },
+      select: {
+        id: true,
+        user: { select: { name: true } },
+        resumes: {
+          orderBy: { createdAt: "desc" },
+          include: {
+            resumes: { orderBy: { createdAt: "desc" }, take: 1 },
+          },
+        },
+      },
     });
 
     if (!candidate) {
       return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
     }
 
-    if (!candidate.resume) {
-      return NextResponse.json({ error: "No resume uploaded for this candidate" }, { status: 404 });
-    }
-
     return NextResponse.json({
       data: {
         candidateId: candidate.id,
-        candidateName: candidate.name,
-        resumeUrl: candidate.resume,
+        candidateName: candidate.user.name,
+        resumes: candidate.resumes,
       },
     });
   } catch (error) {
     console.error("GET /api/candidates/[id]/resume error:", error);
-    return NextResponse.json({ error: "Failed to fetch resume" }, { status: 500 });
+    return NextResponse.json({ error: "Failed to fetch resumes" }, { status: 500 });
   }
 }
 
-export async function PUT(
+export async function POST(
   request: NextRequest,
   { params }: { params: { id: string } }
 ) {
@@ -55,58 +70,59 @@ export async function PUT(
     }
 
     const body = await request.json();
-    const { resumeUrl, resumeText } = body;
+    const validated = uploadResumeSchema.parse(body);
 
-    if (!resumeUrl && !resumeText) {
+    const validExtensions = [".pdf", ".doc", ".docx", ".txt"];
+    const ext = validated.fileName.split(".").pop()?.toLowerCase();
+    if (!ext || !validExtensions.includes(`.${ext}`)) {
       return NextResponse.json(
-        { error: "Either resumeUrl or resumeText is required" },
+        { error: "Invalid file type. Allowed: PDF, DOC, DOCX, TXT" },
         { status: 400 }
       );
     }
 
-    const updateData: any = {};
-
-    if (resumeUrl) {
-      const validExtensions = [".pdf", ".doc", ".docx", ".txt"];
-      const url = new URL(resumeUrl);
-      const ext = url.pathname.split(".").pop()?.toLowerCase();
-
-      if (!ext || !validExtensions.includes(`.${ext}`)) {
-        return NextResponse.json(
-          { error: "Invalid file type. Allowed: PDF, DOC, DOCX, TXT" },
-          { status: 400 }
-        );
-      }
-      updateData.resume = resumeUrl;
+    if (validated.fileSize > 10 * 1024 * 1024) {
+      return NextResponse.json(
+        { error: "File size must be less than 10MB" },
+        { status: 400 }
+      );
     }
 
-    if (resumeText) {
-      updateData.resume = resumeText;
-      updateData.metadata = {
-        ...(candidate.metadata as any || {}),
-        resumeText,
-        resumeUploadedAt: new Date().toISOString(),
-      };
+    if (validated.isDefault) {
+      await prisma.candidateResume.updateMany({
+        where: { candidateId: params.id, isDefault: true },
+        data: { isDefault: false },
+      });
     }
 
-    const updated = await prisma.candidate.update({
-      where: { id: params.id },
-      data: updateData,
-      select: { id: true, name: true, resume: true },
+    const resume = await prisma.candidateResume.create({
+      data: {
+        candidateId: params.id,
+        title: validated.title,
+        fileUrl: validated.fileUrl,
+        fileName: validated.fileName,
+        fileSize: validated.fileSize,
+        mimeType: validated.mimeType,
+        isDefault: validated.isDefault,
+        status: "UPLOADING",
+      },
     });
 
-    return NextResponse.json({
-      data: updated,
-      message: "Resume updated successfully",
-    });
+    return NextResponse.json({ data: resume }, { status: 201 });
   } catch (error) {
-    console.error("PUT /api/candidates/[id]/resume error:", error);
-    return NextResponse.json({ error: "Failed to update resume" }, { status: 500 });
+    if (error instanceof z.ZodError) {
+      return NextResponse.json(
+        { error: "Validation failed", details: error.errors },
+        { status: 400 }
+      );
+    }
+    console.error("POST /api/candidates/[id]/resume error:", error);
+    return NextResponse.json({ error: "Failed to upload resume" }, { status: 500 });
   }
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   { params }: { params: { id: string } }
 ) {
   try {
@@ -115,17 +131,24 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const candidate = await prisma.candidate.findUnique({ where: { id: params.id } });
-    if (!candidate) {
-      return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
+    const { searchParams } = new URL(request.url);
+    const resumeId = searchParams.get("resumeId");
+
+    if (!resumeId) {
+      return NextResponse.json({ error: "resumeId is required" }, { status: 400 });
     }
 
-    await prisma.candidate.update({
-      where: { id: params.id },
-      data: { resume: null },
+    const resume = await prisma.candidateResume.findUnique({
+      where: { id: resumeId },
     });
 
-    return NextResponse.json({ message: "Resume removed" });
+    if (!resume || resume.candidateId !== params.id) {
+      return NextResponse.json({ error: "Resume not found" }, { status: 404 });
+    }
+
+    await prisma.candidateResume.delete({ where: { id: resumeId } });
+
+    return NextResponse.json({ message: "Resume deleted" });
   } catch (error) {
     console.error("DELETE /api/candidates/[id]/resume error:", error);
     return NextResponse.json({ error: "Failed to delete resume" }, { status: 500 });

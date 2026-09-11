@@ -36,6 +36,7 @@ export type {
   UpdateApplicationInput,
   ApplicationFilter,
   ApplicationStats,
+  BulkActionInput,
 } from "./application-service";
 
 export type {
@@ -81,6 +82,28 @@ export const recruitmentPipeline = {
       applications: applicationStats,
       interviews: interviewStats,
       offers: offerStats,
+    };
+  },
+
+  async getFullJobPipeline(jobId: string) {
+    const [job, applications, interviews] = await Promise.all([
+      jobService.getById(jobId),
+      applicationService.getApplicationsByJob(jobId, 1, 100),
+      interviewService.getAll(
+        "",
+        { jobId },
+        1,
+        100
+      ),
+    ]);
+
+    const funnel = await jobService.getJobFunnel(jobId);
+
+    return {
+      job,
+      applications: applications.applications,
+      interviews: interviews.interviews,
+      funnel,
     };
   },
 };

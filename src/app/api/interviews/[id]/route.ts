@@ -6,41 +6,17 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const updateInterviewSchema = z.object({
   type: z.enum(["phone", "video", "onsite", "technical", "panel", "cultural", "executive"]).optional(),
+  title: z.string().min(1).max(200).optional(),
+  description: z.string().optional().nullable(),
   scheduledAt: z.string().datetime().optional(),
-  duration: z.number().min(15).max(480).optional(),
-  location: z.string().optional(),
-  meetingLink: z.string().url().optional().or(z.literal("")),
-  interviewerId: z.string().optional(),
-  notes: z.string().optional(),
-  status: z.enum(["scheduled", "in_progress", "completed", "cancelled", "rescheduled", "no_show"]).optional(),
+  durationMinutes: z.number().min(15).max(480).optional(),
+  location: z.string().optional().nullable(),
+  meetingUrl: z.string().url().optional().or(z.literal("")).nullable(),
+  notes: z.string().optional().nullable(),
+  status: z
+    .enum(["SCHEDULED", "IN_PROGRESS", "COMPLETED", "CANCELLED", "NO_SHOW", "RESCHEDULED"])
+    .optional(),
 });
-
-async function getInterviewWithRelations(id: string) {
-  return prisma.interview.findUnique({
-    where: { id },
-    include: {
-      candidate: {
-        select: {
-          id: true, name: true, email: true, avatar: true,
-          title: true, location: true, phone: true,
-          skills: true, experience: true, education: true,
-        },
-      },
-      application: {
-        include: {
-          job: {
-            select: {
-              id: true, title: true, department: true, location: true,
-              requiredSkills: true, description: true,
-            },
-          },
-          candidate: { select: { id: true, name: true, email: true } },
-        },
-      },
-      interviewer: { select: { id: true, name: true, email: true, avatar: true } },
-    },
-  });
-}
 
 export async function GET(
   _request: NextRequest,
@@ -52,7 +28,34 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const interview = await getInterviewWithRelations(params.id);
+    const interview = await prisma.interview.findUnique({
+      where: { id: params.id },
+      include: {
+        candidate: {
+          include: {
+            user: { select: { id: true, name: true, email: true, avatarUrl: true, phone: true } },
+            skills: true,
+            experiences: true,
+            educations: true,
+          },
+        },
+        jobPosting: {
+          select: {
+            id: true, title: true, department: true, location: true,
+            description: true, requirements: true, responsibilities: true,
+            experienceLevel: true, salaryMin: true, salaryMax: true,
+          },
+        },
+        application: {
+          select: { id: true, status: true, rating: true },
+        },
+        panels: true,
+        questions: { orderBy: { order: "asc" } },
+        scores: true,
+        feedback: true,
+      },
+    });
+
     if (!interview) {
       return NextResponse.json({ error: "Interview not found" }, { status: 404 });
     }
@@ -79,9 +82,9 @@ export async function PUT(
       return NextResponse.json({ error: "Interview not found" }, { status: 404 });
     }
 
-    if (existing.status === "completed" || existing.status === "cancelled") {
+    if (existing.status === "COMPLETED" || existing.status === "CANCELLED") {
       return NextResponse.json(
-        { error: `Cannot update a ${existing.status} interview` },
+        { error: `Cannot update a ${existing.status.toLowerCase()} interview` },
         { status: 400 }
       );
     }
@@ -97,38 +100,29 @@ export async function PUT(
           { status: 400 }
         );
       }
+    }
 
-      const interviewerId = validated.interviewerId || existing.interviewerId;
-      if (interviewerId && validated.scheduledAt) {
-        const duration = validated.duration || existing.duration;
-        const conflicting = await prisma.interview.findFirst({
-          where: {
-            id: { not: params.id },
-            interviewerId,
-            status: { in: ["scheduled", "rescheduled"] },
-            scheduledAt: {
-              gte: new Date(newDate.getTime() - duration * 60000),
-              lte: new Date(newDate.getTime() + duration * 60000),
-            },
-          },
-        });
+    const updateData: any = { ...validated };
+    if (validated.meetingUrl === "") updateData.meetingUrl = null;
+    if (validated.location === "") updateData.location = null;
+    if (validated.description === "") updateData.description = null;
+    if (validated.notes === "") updateData.notes = null;
 
-        if (conflicting) {
-          return NextResponse.json(
-            { error: "Interviewer has a conflicting interview at this time" },
-            { status: 409 }
-          );
-        }
+    if (validated.status && validated.status !== existing.status) {
+      if (validated.status === "COMPLETED") {
+        updateData.completedAt = new Date();
       }
     }
 
     const interview = await prisma.interview.update({
       where: { id: params.id },
-      data: validated,
+      data: updateData,
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        application: { include: { job: { select: { id: true, title: true } } } },
-        interviewer: { select: { id: true, name: true, email: true } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
+        jobPosting: { select: { id: true, title: true } },
+        panels: true,
       },
     });
 
@@ -160,16 +154,16 @@ export async function DELETE(
       return NextResponse.json({ error: "Interview not found" }, { status: 404 });
     }
 
-    if (interview.status === "completed") {
+    if (interview.status === "COMPLETED") {
       return NextResponse.json(
-        { error: "Cannot delete a completed interview" },
+        { error: "Cannot cancel a completed interview" },
         { status: 400 }
       );
     }
 
     await prisma.interview.update({
       where: { id: params.id },
-      data: { status: "cancelled" },
+      data: { status: "CANCELLED" },
     });
 
     return NextResponse.json({ message: "Interview cancelled" });

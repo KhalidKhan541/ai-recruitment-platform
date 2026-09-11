@@ -1,328 +1,267 @@
 import { useState } from "react";
+import { cn, formatDate, formatRelativeTime } from "@/lib/utils";
 
-export interface Application {
+export interface ApplicationData {
   id: string;
-  candidateId: string;
-  candidateName: string;
-  candidateEmail: string;
-  candidateAvatar?: string;
-  jobId: string;
-  jobTitle: string;
-  appliedAt: string;
-  status:
-    | "submitted"
-    | "screening"
-    | "interview"
-    | "assessment"
-    | "offer"
-    | "hired"
-    | "rejected"
-    | "withdrawn";
-  resumeScore: number;
-  coverLetter?: string;
-  notes?: string;
-  matchScore: number;
-  experience: number;
-  education: string;
+  status: string;
+  coverLetter?: string | null;
+  source?: string | null;
+  rating?: number | null;
+  createdAt: string;
+  updatedAt: string;
+  candidate: {
+    id: string;
+    firstName?: string;
+    lastName?: string;
+    name?: string;
+    email: string;
+    headline?: string | null;
+    user?: {
+      name: string;
+      avatarUrl?: string | null;
+    };
+  };
+  job: {
+    id: string;
+    title: string;
+    department?: string | null;
+  };
+  matchScore?: number | null;
+  screeningAnswers?: { questionId: string; answer: string }[];
 }
 
 interface ApplicationCardProps {
-  application: Application;
-  onAdvance?: (app: Application) => void;
-  onReject?: (app: Application) => void;
-  onViewResume?: (candidateId: string) => void;
-  onScheduleInterview?: (app: Application) => void;
-  onAddNote?: (app: Application, note: string) => void;
+  application: ApplicationData;
+  onView?: (app: ApplicationData) => void;
+  onAdvance?: (app: ApplicationData) => void;
+  onReject?: (app: ApplicationData) => void;
+  onScheduleInterview?: (app: ApplicationData) => void;
+  onAddNote?: (app: ApplicationData) => void;
+  compact?: boolean;
+  className?: string;
 }
 
-const statusConfig: Record<
-  Application["status"],
-  { label: string; color: string; bg: string }
-> = {
-  submitted: {
-    label: "Submitted",
-    color: "text-gray-700",
-    bg: "bg-gray-100",
-  },
-  screening: {
-    label: "Screening",
-    color: "text-blue-700",
-    bg: "bg-blue-100",
-  },
-  interview: {
-    label: "Interview",
-    color: "text-purple-700",
-    bg: "bg-purple-100",
-  },
-  assessment: {
-    label: "Assessment",
-    color: "text-indigo-700",
-    bg: "bg-indigo-100",
-  },
-  offer: {
-    label: "Offer",
-    color: "text-amber-700",
-    bg: "bg-amber-100",
-  },
-  hired: {
-    label: "Hired",
-    color: "text-emerald-700",
-    bg: "bg-emerald-100",
-  },
-  rejected: {
-    label: "Rejected",
-    color: "text-red-700",
-    bg: "bg-red-100",
-  },
-  withdrawn: {
-    label: "Withdrawn",
-    color: "text-orange-700",
-    bg: "bg-orange-100",
-  },
+const statusConfig: Record<string, { label: string; color: string; bg: string; nextAction?: string }> = {
+  NEW: { label: "New", color: "text-blue-600", bg: "bg-blue-100", nextAction: "Screen" },
+  SUBMITTED: { label: "Submitted", color: "text-blue-600", bg: "bg-blue-100", nextAction: "Review" },
+  SCREENING: { label: "Screening", color: "text-indigo-600", bg: "bg-indigo-100", nextAction: "Phone Screen" },
+  REVIEW: { label: "In Review", color: "text-purple-600", bg: "bg-purple-100", nextAction: "Interview" },
+  PHONE_SCREEN: { label: "Phone Screen", color: "text-cyan-600", bg: "bg-cyan-100", nextAction: "Technical" },
+  PHONE_INTERVIEW: { label: "Phone Interview", color: "text-cyan-600", bg: "bg-cyan-100", nextAction: "Technical" },
+  TECHNICAL: { label: "Technical", color: "text-blue-600", bg: "bg-blue-100", nextAction: "Onsite" },
+  TECHNICAL_INTERVIEW: { label: "Technical Interview", color: "text-blue-600", bg: "bg-blue-100", nextAction: "Final" },
+  ONSITE: { label: "Onsite", color: "text-violet-600", bg: "bg-violet-100", nextAction: "Offer" },
+  FINAL_INTERVIEW: { label: "Final Interview", color: "text-violet-600", bg: "bg-violet-100", nextAction: "Offer" },
+  OFFER: { label: "Offer", color: "text-emerald-600", bg: "bg-emerald-100" },
+  OFFER_PENDING: { label: "Offer Pending", color: "text-amber-600", bg: "bg-amber-100" },
+  OFFER_EXTENDED: { label: "Offer Extended", color: "text-emerald-600", bg: "bg-emerald-100" },
+  OFFER_ACCEPTED: { label: "Accepted", color: "text-emerald-700", bg: "bg-emerald-100" },
+  OFFER_DECLINED: { label: "Declined", color: "text-red-600", bg: "bg-red-100" },
+  HIRED: { label: "Hired", color: "text-emerald-700", bg: "bg-emerald-100" },
+  REJECTED: { label: "Rejected", color: "text-red-600", bg: "bg-red-100" },
+  WITHDRAWN: { label: "Withdrawn", color: "text-gray-600", bg: "bg-gray-100" },
 };
-
-const stageOrder: Application["status"][] = [
-  "submitted",
-  "screening",
-  "interview",
-  "assessment",
-  "offer",
-  "hired",
-];
 
 export function ApplicationCard({
   application,
+  onView,
   onAdvance,
   onReject,
-  onViewResume,
   onScheduleInterview,
   onAddNote,
+  compact = false,
+  className,
 }: ApplicationCardProps) {
-  const [showNoteInput, setShowNoteInput] = useState(false);
-  const [noteText, setNoteText] = useState(application.notes || "");
-  const config = statusConfig[application.status];
-  const stageIndex = stageOrder.indexOf(application.status);
+  const [showActions, setShowActions] = useState(false);
 
-  const getScoreColor = (score: number) => {
-    if (score >= 80) return "text-emerald-600 bg-emerald-50";
-    if (score >= 60) return "text-amber-600 bg-amber-50";
-    return "text-red-600 bg-red-50";
-  };
+  const status = statusConfig[application.status] || statusConfig.NEW;
+  const candidateName =
+    application.candidate.name ||
+    `${application.candidate.firstName || ""} ${application.candidate.lastName || ""}`.trim() ||
+    "Unknown";
 
-  const getMatchColor = (score: number) => {
-    if (score >= 85) return "from-emerald-500 to-green-500";
-    if (score >= 70) return "from-blue-500 to-cyan-500";
-    if (score >= 50) return "from-amber-500 to-orange-500";
-    return "from-red-500 to-pink-500";
-  };
-
-  const initials = application.candidateName
+  const initials = candidateName
     .split(" ")
     .map((n) => n[0])
     .join("")
     .toUpperCase()
     .slice(0, 2);
 
-  return (
-    <div className="bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md transition-shadow overflow-hidden">
-      <div className="p-5">
-        <div className="flex items-start gap-4">
-          <div className="relative flex-shrink-0">
-            {application.candidateAvatar ? (
-              <img
-                src={application.candidateAvatar}
-                alt={application.candidateName}
-                className="w-12 h-12 rounded-full object-cover"
-              />
-            ) : (
-              <div className="w-12 h-12 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-white font-bold text-sm">
-                {initials}
-              </div>
-            )}
-            <div
-              className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full flex items-center justify-center text-white text-[8px] font-bold bg-gradient-to-br ${getMatchColor(
-                application.matchScore
-              )}`}
-            >
-              {application.matchScore}
-            </div>
-          </div>
+  const getScoreColor = (score: number) => {
+    if (score >= 90) return "text-emerald-600 bg-emerald-50";
+    if (score >= 75) return "text-blue-600 bg-blue-50";
+    if (score >= 60) return "text-amber-600 bg-amber-50";
+    return "text-red-600 bg-red-50";
+  };
 
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-semibold text-gray-900 truncate">
-                {application.candidateName}
-              </h3>
-              <span
-                className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${config.bg} ${config.color}`}
-              >
-                {config.label}
-              </span>
-            </div>
-            <p className="text-sm text-gray-500 mt-0.5 truncate">
-              {application.jobTitle}
-            </p>
-            <div className="flex items-center gap-3 mt-2 text-xs text-gray-500">
-              <span>{application.experience} years exp</span>
-              <span>·</span>
-              <span>{application.education}</span>
-              <span>·</span>
-              <span>
-                Applied{" "}
-                {new Date(application.appliedAt).toLocaleDateString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                })}
-              </span>
-            </div>
-          </div>
-        </div>
-
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <div
-            className={`flex items-center gap-2 px-3 py-2 rounded-xl ${getScoreColor(
-              application.resumeScore
-            )}`}
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"
-              />
-            </svg>
-            <div>
-              <p className="text-[10px] uppercase tracking-wider opacity-70">Resume</p>
-              <p className="text-sm font-bold">{application.resumeScore}/100</p>
-            </div>
-          </div>
-          <div
-            className={`flex items-center gap-2 px-3 py-2 rounded-xl ${getScoreColor(
-              application.matchScore
-            )}`}
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M13 10V3L4 14h7v7l9-11h-7z"
-              />
-            </svg>
-            <div>
-              <p className="text-[10px] uppercase tracking-wider opacity-70">Match</p>
-              <p className="text-sm font-bold">{application.matchScore}%</p>
-            </div>
-          </div>
-        </div>
-
-        {application.status !== "hired" &&
-          application.status !== "rejected" &&
-          application.status !== "withdrawn" && (
-            <div className="mt-4 flex items-center gap-1">
-              {stageOrder.slice(0, -1).map((stage, i) => (
-                <div
-                  key={stage}
-                  className={`flex-1 h-1.5 rounded-full transition-colors ${
-                    i <= stageIndex ? "bg-blue-500" : "bg-gray-200"
-                  }`}
-                />
-              ))}
-            </div>
-          )}
-
-        {application.coverLetter && (
-          <div className="mt-4 p-3 bg-gray-50 rounded-xl">
-            <p className="text-xs font-medium text-gray-500 mb-1">Cover Letter</p>
-            <p className="text-sm text-gray-600 line-clamp-3">{application.coverLetter}</p>
-          </div>
+  if (compact) {
+    return (
+      <div
+        className={cn(
+          "flex items-center gap-3 p-3 bg-white rounded-xl border border-gray-200 hover:border-blue-300 hover:shadow-sm transition-all cursor-pointer group",
+          className
         )}
+        onClick={() => onView?.(application)}
+      >
+        <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-xs flex-shrink-0">
+          {application.candidate.user?.avatarUrl ? (
+            <img src={application.candidate.user.avatarUrl} alt="" className="w-full h-full rounded-full object-cover" />
+          ) : (
+            initials
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm font-medium text-gray-900 truncate">{candidateName}</p>
+          <p className="text-xs text-gray-500 truncate">{application.job.title}</p>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {application.matchScore != null && (
+            <span className={cn("px-2 py-0.5 text-[10px] font-bold rounded-full", getScoreColor(application.matchScore))}>
+              {application.matchScore}%
+            </span>
+          )}
+          <span className={cn("px-2 py-0.5 text-[10px] font-medium rounded-full", status.bg, status.color)}>
+            {status.label}
+          </span>
+        </div>
       </div>
+    );
+  }
 
-      <div className="px-5 py-3 bg-gray-50 border-t border-gray-100">
-        {showNoteInput ? (
-          <div className="space-y-2">
-            <textarea
-              value={noteText}
-              onChange={(e) => setNoteText(e.target.value)}
-              placeholder="Add a note about this candidate..."
-              className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 outline-none resize-none"
-              rows={2}
-            />
-            <div className="flex items-center gap-2">
-              <button
-                onClick={() => {
-                  onAddNote?.(application, noteText);
-                  setShowNoteInput(false);
-                }}
-                className="px-3 py-1 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700"
+  return (
+    <div
+      className={cn(
+        "bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md transition-all overflow-hidden group",
+        className
+      )}
+    >
+      <div className="p-5">
+        <div className="flex items-start justify-between mb-4">
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <div className="w-11 h-11 rounded-full bg-gradient-to-br from-blue-500 to-indigo-600 flex items-center justify-center text-white font-bold text-sm">
+                {application.candidate.user?.avatarUrl ? (
+                  <img src={application.candidate.user.avatarUrl} alt="" className="w-full h-full rounded-full object-cover" />
+                ) : (
+                  initials
+                )}
+              </div>
+              {application.matchScore != null && (
+                <div className={cn("absolute -bottom-1 -right-1 w-6 h-6 rounded-full flex items-center justify-center text-[8px] font-bold border-2 border-white", getScoreColor(application.matchScore))}>
+                  {application.matchScore}
+                </div>
+              )}
+            </div>
+            <div>
+              <h3
+                className="text-base font-semibold text-gray-900 hover:text-blue-600 transition-colors cursor-pointer"
+                onClick={() => onView?.(application)}
               >
-                Save
-              </button>
-              <button
-                onClick={() => setShowNoteInput(false)}
-                className="px-3 py-1 text-gray-500 text-xs font-medium hover:text-gray-700"
-              >
-                Cancel
-              </button>
+                {candidateName}
+              </h3>
+              <p className="text-sm text-gray-500">{application.candidate.headline || application.candidate.email}</p>
+              <p className="text-xs text-gray-400 mt-0.5">
+                Applied {formatRelativeTime(application.createdAt)}
+              </p>
             </div>
           </div>
-        ) : (
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-2">
-              {application.status !== "hired" &&
-                application.status !== "rejected" &&
-                application.status !== "withdrawn" && (
-                  <>
-                    <button
-                      onClick={() => onAdvance?.(application)}
-                      className="px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition-colors"
-                    >
-                      Advance →
-                    </button>
-                    {application.status === "screening" && (
-                      <button
-                        onClick={() => onScheduleInterview?.(application)}
-                        className="px-3 py-1.5 border border-purple-300 text-purple-700 text-xs font-medium rounded-lg hover:bg-purple-50 transition-colors"
-                      >
-                        Schedule Interview
-                      </button>
-                    )}
-                    <button
-                      onClick={() => onReject?.(application)}
-                      className="px-3 py-1.5 border border-red-300 text-red-700 text-xs font-medium rounded-lg hover:bg-red-50 transition-colors"
-                    >
-                      Reject
-                    </button>
-                  </>
-                )}
-            </div>
-            <div className="flex items-center gap-2">
+
+          <div className="flex items-center gap-2">
+            <span className={cn("px-2.5 py-1 text-[11px] font-medium rounded-full", status.bg, status.color)}>
+              {status.label}
+            </span>
+            <div className="relative">
               <button
-                onClick={() => setShowNoteInput(true)}
-                className="px-2 py-1.5 text-gray-400 hover:text-gray-600 transition-colors"
-                title="Add note"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowActions(!showActions);
+                }}
+                className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-colors opacity-0 group-hover:opacity-100"
               >
                 <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    strokeWidth={2}
-                    d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z"
-                  />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 5v.01M12 12v.01M12 19v.01" />
                 </svg>
               </button>
-              <button
-                onClick={() => onViewResume?.(application.candidateId)}
-                className="px-3 py-1.5 border border-gray-300 text-gray-700 text-xs font-medium rounded-lg hover:bg-gray-100 transition-colors"
-              >
-                View Resume
-              </button>
+              {showActions && (
+                <div className="absolute right-0 top-full mt-1 w-48 bg-white rounded-xl border border-gray-200 shadow-lg py-1 z-20">
+                  <button onClick={() => { onView?.(application); setShowActions(false); }} className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50">
+                    View Profile
+                  </button>
+                  {onScheduleInterview && (
+                    <button onClick={() => { onScheduleInterview(application); setShowActions(false); }} className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50">
+                      Schedule Interview
+                    </button>
+                  )}
+                  {onAddNote && (
+                    <button onClick={() => { onAddNote(application); setShowActions(false); }} className="w-full px-3 py-2 text-left text-sm text-gray-700 hover:bg-gray-50">
+                      Add Note
+                    </button>
+                  )}
+                  {onReject && (
+                    <button onClick={() => { onReject(application); setShowActions(false); }} className="w-full px-3 py-2 text-left text-sm text-red-600 hover:bg-red-50">
+                      Reject
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </div>
+        </div>
+
+        {application.rating != null && (
+          <div className="flex items-center gap-1 mb-3">
+            {[1, 2, 3, 4, 5].map((star) => (
+              <svg
+                key={star}
+                className={cn("w-4 h-4", star <= application.rating! ? "text-amber-400" : "text-gray-200")}
+                fill="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+              </svg>
+            ))}
+          </div>
         )}
+
+        {application.coverLetter && (
+          <div className="p-3 bg-gray-50 rounded-xl mb-4">
+            <p className="text-xs font-medium text-gray-500 mb-1">Cover Letter</p>
+            <p className="text-sm text-gray-700 line-clamp-2">{application.coverLetter}</p>
+          </div>
+        )}
+
+        <div className="flex items-center gap-3 text-xs text-gray-500">
+          <span className="flex items-center gap-1">
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 13.255A23.931 23.931 0 0112 15c-3.183 0-6.22-.62-9-1.745M16 6V4a2 2 0 00-2-2h-4a2 2 0 00-2 2v2m4 6h.01M5 20h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" /></svg>
+            {application.job.title}
+          </span>
+          {application.source && (
+            <span className="px-2 py-0.5 bg-gray-100 rounded-full text-[10px]">{application.source}</span>
+          )}
+        </div>
       </div>
+
+      {status.nextAction && (
+        <div className="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+          <span className="text-xs text-gray-400">Next: {status.nextAction}</span>
+          <div className="flex items-center gap-2">
+            {onAdvance && (
+              <button
+                onClick={() => onAdvance(application)}
+                className="px-3 py-1.5 bg-blue-600 text-white text-xs font-medium rounded-lg hover:bg-blue-700 transition-colors"
+              >
+                {status.nextAction}
+              </button>
+            )}
+            <button
+              onClick={() => onView?.(application)}
+              className="text-xs text-gray-500 hover:text-gray-700 font-medium"
+            >
+              Details →
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

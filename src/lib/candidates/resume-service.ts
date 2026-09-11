@@ -1,9 +1,10 @@
 import { prisma } from "@/lib/prisma";
+import { AppError } from "@/lib/errors";
 import { ResumeMatchScore, ResumeParsedData } from "@/types/candidate";
 
 // ─── Resume Service ──────────────────────────────────────────────────────────
 // Handles resume upload, parsing, storage, skill extraction,
-// job-candidate matching scoring, and document versioning.
+// job-candidate matching scoring, document versioning, and ATS optimization.
 
 export interface Resume {
   id: string;
@@ -58,27 +59,63 @@ export interface ResumeFilter {
 
 export interface ResumeStats {
   totalResumes: number;
-  totalSize: number;
-  averageSize: number;
-  byMimeType: { mimeType: string; count: number; totalSize: number }[];
   parsedCount: number;
   unparsedCount: number;
-  averageMatchScore: number;
+  averageSize: number;
+  byMimeType: { mimeType: string; count: number }[];
+  matchScoreDistribution: { range: string; count: number }[];
+}
+
+export interface ATSAnalysis {
+  score: number;
+  keywords: string[];
+  missingKeywords: string[];
+  formattingIssues: string[];
+  recommendations: string[];
+  sections: {
+    contact: boolean;
+    summary: boolean;
+    experience: boolean;
+    education: boolean;
+    skills: boolean;
+  };
 }
 
 export class ResumeService {
-  // ─── Upload & Management ───────────────────────────────────────────────────
+  // ─── CRUD Operations ───────────────────────────────────────────────────────
 
   async upload(input: ResumeUploadInput): Promise<Resume> {
     const candidate = await prisma.candidate.findUnique({
       where: { id: input.candidateId },
     });
-    if (!candidate) throw new Error("Candidate not found");
+    if (!candidate) throw AppError.notFound("Candidate");
 
-    await prisma.candidateResume.updateMany({
+    const allowedTypes = [
+      "application/pdf",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain",
+    ];
+    if (!allowedTypes.includes(input.mimeType)) {
+      throw AppError.badRequest(
+        "Invalid file type. Accepted formats: PDF, DOC, DOCX, TXT"
+      );
+    }
+
+    const maxSize = 10 * 1024 * 1024;
+    if (input.size > maxSize) {
+      throw AppError.badRequest("File size must be less than 10MB");
+    }
+
+    const currentResume = await prisma.candidateResume.findFirst({
       where: { candidateId: input.candidateId, status: "current" },
-      data: { status: "outdated" },
     });
+    if (currentResume) {
+      await prisma.candidateResume.update({
+        where: { id: currentResume.id },
+        data: { status: "outdated" },
+      });
+    }
 
     const resume = await prisma.candidateResume.create({
       data: {
@@ -90,6 +127,8 @@ export class ResumeService {
         mimeType: input.mimeType,
         size: input.size,
         status: "current",
+        parsedContent: null,
+        parsedData: null,
       },
     });
 
@@ -99,19 +138,20 @@ export class ResumeService {
   async getById(resumeId: string): Promise<Resume | null> {
     const resume = await prisma.candidateResume.findUnique({
       where: { id: resumeId },
-      include: {
-        candidate: {
-          select: { id: true, firstName: true, lastName: true, email: true },
-        },
-      },
     });
     return resume ? this.formatResume(resume) : null;
+  }
+
+  async getByIdOrThrow(resumeId: string): Promise<Resume> {
+    const resume = await this.getById(resumeId);
+    if (!resume) throw AppError.notFound("Resume");
+    return resume;
   }
 
   async getByCandidate(candidateId: string): Promise<Resume[]> {
     const resumes = await prisma.candidateResume.findMany({
       where: { candidateId },
-      orderBy: { uploadedAt: "desc" },
+      orderBy: { createdAt: "desc" },
     });
     return resumes.map((r) => this.formatResume(r));
   }
@@ -123,46 +163,76 @@ export class ResumeService {
     return resume ? this.formatResume(resume) : null;
   }
 
-  async delete(resumeId: string): Promise<void> {
-    const existing = await prisma.candidateResume.findUnique({ where: { id: resumeId } });
-    if (!existing) throw new Error("Resume not found");
+  async getAll(
+    firmId: string,
+    filters?: ResumeFilter,
+    page = 1,
+    limit = 20
+  ): Promise<{ resumes: Resume[]; total: number }> {
+    const where = this.buildWhereClause(firmId, filters);
+    const skip = (page - 1) * limit;
 
+    const [resumes, total] = await Promise.all([
+      prisma.candidateResume.findMany({
+        where,
+        include: {
+          candidate: {
+            select: { id: true, firstName: true, lastName: true, email: true },
+          },
+        },
+        skip,
+        take: limit,
+        orderBy: { createdAt: "desc" },
+      }),
+      prisma.candidateResume.count({ where }),
+    ]);
+
+    return {
+      resumes: resumes.map((r) => this.formatResume(r)),
+      total,
+    };
+  }
+
+  async delete(resumeId: string): Promise<void> {
+    const resume = await this.getByIdOrThrow(resumeId);
+
+    await prisma.resumeMatchScore.deleteMany({ where: { resumeId } });
     await prisma.candidateResume.delete({ where: { id: resumeId } });
 
-    if (existing.status === "current") {
-      const mostRecent = await prisma.candidateResume.findFirst({
-        where: { candidateId: existing.candidateId },
-        orderBy: { uploadedAt: "desc" },
+    if (resume.status === "current") {
+      const nextResume = await prisma.candidateResume.findFirst({
+        where: { candidateId: resume.candidateId },
+        orderBy: { createdAt: "desc" },
       });
-      if (mostRecent) {
+      if (nextResume) {
         await prisma.candidateResume.update({
-          where: { id: mostRecent.id },
+          where: { id: nextResume.id },
           data: { status: "current" },
         });
       }
     }
   }
 
-  async setStatus(resumeId: string, status: "current" | "outdated" | "in_review"): Promise<Resume> {
-    const existing = await prisma.candidateResume.findUnique({ where: { id: resumeId } });
-    if (!existing) throw new Error("Resume not found");
+  async setAsCurrent(resumeId: string): Promise<Resume> {
+    const resume = await this.getByIdOrThrow(resumeId);
 
-    if (status === "current") {
-      await prisma.candidateResume.updateMany({
-        where: { candidateId: existing.candidateId, status: "current", id: { not: resumeId } },
-        data: { status: "outdated" },
-      });
-    }
+    await prisma.candidateResume.updateMany({
+      where: { candidateId: resume.candidateId, status: "current" },
+      data: { status: "outdated" },
+    });
 
-    const updated = await prisma.candidateResume.update({ where: { id: resumeId }, data: { status } });
+    const updated = await prisma.candidateResume.update({
+      where: { id: resumeId },
+      data: { status: "current" },
+    });
+
     return this.formatResume(updated);
   }
 
   // ─── Parsing ───────────────────────────────────────────────────────────────
 
   async parseResume(input: ParseResumeInput): Promise<Resume> {
-    const existing = await prisma.candidateResume.findUnique({ where: { id: input.resumeId } });
-    if (!existing) throw new Error("Resume not found");
+    const resume = await this.getByIdOrThrow(input.resumeId);
 
     const updated = await prisma.candidateResume.update({
       where: { id: input.resumeId },
@@ -173,224 +243,341 @@ export class ResumeService {
       },
     });
 
-    if (input.parsedData.skills?.length) {
-      const candidateId = existing.candidateId;
-      const existingSkills = await prisma.candidateSkill.findMany({ where: { candidateId } });
-      const existingNames = new Set(existingSkills.map((s) => s.skillName));
-      const newSkills = input.parsedData.skills.filter((s) => !existingNames.has(s));
+    if (input.parsedData.skills && input.parsedData.skills.length > 0) {
+      const candidate = await prisma.candidate.findUnique({
+        where: { id: resume.candidateId },
+        include: { skills: true },
+      });
 
-      if (newSkills.length > 0) {
-        await prisma.candidateSkill.createMany({
-          data: newSkills.map((skill) => ({
-            candidateId,
-            skillName: skill,
-            level: "INTERMEDIATE",
-            isVerified: false,
-            endorsements: 0,
-          })),
-        });
+      if (candidate) {
+        const existingSkills = new Set(
+          candidate.skills.map((s) => s.skillName.toLowerCase())
+        );
+        const newSkills = input.parsedData.skills.filter(
+          (s) => !existingSkills.has(s.name.toLowerCase())
+        );
+
+        if (newSkills.length > 0) {
+          await prisma.candidateSkill.createMany({
+            data: newSkills.map((skill) => ({
+              candidateId: resume.candidateId,
+              skillName: skill.name,
+              level: skill.level ?? "BEGINNER",
+              isVerified: false,
+              endorsements: 0,
+            })),
+          });
+        }
       }
     }
 
     return this.formatResume(updated);
   }
 
-  async getUnparsedResumes(limit = 50): Promise<Resume[]> {
-    const resumes = await prisma.candidateResume.findMany({
-      where: { parsedContent: null, status: "current" },
-      orderBy: { uploadedAt: "asc" },
-      take: limit,
+  // ─── Matching ──────────────────────────────────────────────────────────────
+
+  async matchWithJob(input: MatchJobInput): Promise<ResumeMatchScore> {
+    const resume = await this.getByIdOrThrow(input.resumeId);
+
+    const parsedData = resume.parsedData as ResumeParsedData | null;
+    const candidateSkills = parsedData?.skills?.map((s) => s.name.toLowerCase()) ?? [];
+
+    const requiredSkillsLower = input.requiredSkills.map((s) => s.toLowerCase());
+    const matchedSkills = candidateSkills.filter((s) =>
+      requiredSkillsLower.some((r) => s.includes(r) || r.includes(s))
+    );
+    const missingSkills = requiredSkillsLower.filter(
+      (r) => !candidateSkills.some((s) => s.includes(r) || r.includes(s))
+    );
+
+    const skillMatchPercent =
+      requiredSkillsLower.length > 0
+        ? Math.round((matchedSkills.length / requiredSkillsLower.length) * 100)
+        : 100;
+
+    const candidateExp = parsedData?.totalExperience ?? 0;
+    const expMatchPercent =
+      input.requiredExperience > 0
+        ? Math.min(100, Math.round((candidateExp / input.requiredExperience) * 100))
+        : 100;
+
+    const candidateEducation = parsedData?.education?.[0]?.level ?? null;
+    const educationLevels = ["high_school", "associate", "bachelor", "master", "doctorate"];
+    const candidateEduIndex = candidateEducation
+      ? educationLevels.indexOf(candidateEducation.toLowerCase())
+      : -1;
+    const requiredEduIndex = input.requiredEducation
+      ? educationLevels.indexOf(input.requiredEducation.toLowerCase())
+      : 0;
+    const educationMatchPercent =
+      candidateEduIndex >= requiredEduIndex ? 100 : 50;
+
+    const locationMatchPercent =
+      !input.preferredLocation || !parsedData?.location
+        ? 100
+        : parsedData.location.toLowerCase().includes(input.preferredLocation.toLowerCase())
+          ? 100
+          : resume.parsedContent?.toLowerCase().includes("remote")
+            ? 80
+            : 30;
+
+    const overallScore = Math.round(
+      skillMatchPercent * 0.4 +
+      expMatchPercent * 0.3 +
+      educationMatchPercent * 0.15 +
+      locationMatchPercent * 0.15
+    );
+
+    const existingScore = await prisma.resumeMatchScore.findFirst({
+      where: { resumeId: input.resumeId, jobId: input.jobId },
     });
-    return resumes.map((r) => this.formatResume(r));
-  }
 
-  async getResumeContent(resumeId: string): Promise<string | null> {
-    const resume = await prisma.candidateResume.findUnique({
-      where: { id: resumeId },
-      select: { parsedContent: true },
-    });
-    return resume?.parsedContent ?? null;
-  }
-
-  // ─── Job-Candidate Matching ────────────────────────────────────────────────
-
-  async matchJob(input: MatchJobInput): Promise<ResumeMatchScore> {
-    const resume = await prisma.candidateResume.findUnique({
-      where: { id: input.resumeId },
-      include: {
-        candidate: { include: { skills: true } },
-      },
-    });
-    if (!resume) throw new Error("Resume not found");
-    if (!resume.parsedData) throw new Error("Resume has not been parsed yet");
-
-    const parsedData: ResumeParsedData = typeof resume.parsedData === "string"
-      ? JSON.parse(resume.parsedData) : resume.parsedData;
-
-    const candidateSkills = new Set([
-      ...parsedData.skills.map((s) => s.toLowerCase()),
-      ...(resume.candidate.skills ?? []).map((s) => s.skillName.toLowerCase()),
-    ]);
-
-    const matchedSkills = input.requiredSkills.filter((skill) => candidateSkills.has(skill.toLowerCase()));
-    const skillsMatch = input.requiredSkills.length > 0
-      ? Math.round((matchedSkills.length / input.requiredSkills.length) * 100) : 100;
-
-    const totalYears = (parsedData.experience ?? []).reduce((total, exp) => {
-      const start = new Date(exp.startDate);
-      const end = exp.endDate ? new Date(exp.endDate) : new Date();
-      return total + (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24 * 365);
-    }, 0);
-
-    const experienceMatch = Math.min(100, Math.round((totalYears / Math.max(input.requiredExperience, 1)) * 100));
-
-    let educationMatch = 100;
-    if (input.requiredEducation) {
-      const levelMap: Record<string, number> = { "high school": 1, associate: 2, bachelor: 3, master: 4, phd: 5 };
-      const requiredLevel = Object.entries(levelMap).find(([k]) => input.requiredEducation!.toLowerCase().includes(k))?.[1] ?? 3;
-      const degrees = (parsedData.education ?? []).map((e) => e.degree.toLowerCase());
-      const highest = Math.max(...degrees.map((d) => Object.entries(levelMap).find(([k]) => d.includes(k))?.[1] ?? 0), 0);
-      educationMatch = highest >= requiredLevel ? 100 : Math.round((highest / requiredLevel) * 100);
-    }
-
-    let locationMatch = 100;
-    if (input.preferredLocation) {
-      const loc = (resume.candidate as any).location?.toLowerCase() ?? "";
-      const city = (resume.candidate as any).city?.toLowerCase() ?? "";
-      const target = input.preferredLocation.toLowerCase();
-      if (loc.includes(target) || city.includes(target)) locationMatch = 100;
-      else locationMatch = 40;
-    }
-
-    let salaryMatch = 100;
-    if (input.salaryRange) {
-      const prefs = resume.candidate.preferences;
-      if (prefs) {
-        const p = typeof prefs === "string" ? JSON.parse(prefs) : prefs;
-        if (p.desiredSalary) {
-          const mid = (p.desiredSalary.min + p.desiredSalary.max) / 2;
-          const jobMid = (input.salaryRange.min + input.salaryRange.max) / 2;
-          salaryMatch = Math.max(0, Math.round((1 - Math.abs(mid - jobMid) / jobMid) * 100));
-        }
-      }
-    }
-
-    const overallScore = Math.round(skillsMatch * 0.35 + experienceMatch * 0.30 + educationMatch * 0.15 + locationMatch * 0.10 + salaryMatch * 0.10);
-
-    const matchScore: ResumeMatchScore = {
-      jobId: input.jobId, jobTitle: input.jobTitle, overallScore, skillsMatch, experienceMatch, educationMatch, locationMatch, salaryMatch, scoredAt: new Date(),
-    };
-
-    const currentScores: ResumeMatchScore[] = typeof resume.matchScores === "string"
-      ? JSON.parse(resume.matchScores as string || "[]") : resume.matchScores ?? [];
-
-    const idx = currentScores.findIndex((s) => s.jobId === input.jobId);
-    if (idx >= 0) currentScores[idx] = matchScore;
-    else currentScores.push(matchScore);
-
-    await prisma.candidateResume.update({ where: { id: input.resumeId }, data: { matchScores: JSON.stringify(currentScores) } });
-
-    const application = await prisma.application.findFirst({
-      where: { candidateId: resume.candidateId, jobId: input.jobId },
-    });
-    if (application) {
-      await prisma.application.update({ where: { id: application.id }, data: { matchScore: overallScore } });
+    let matchScore: ResumeMatchScore;
+    if (existingScore) {
+      const updated = await prisma.resumeMatchScore.update({
+        where: { id: existingScore.id },
+        data: {
+          overallScore,
+          skillMatchScore: skillMatchPercent,
+          experienceMatchScore: expMatchPercent,
+          educationMatchScore: educationMatchPercent,
+          locationMatchScore: locationMatchPercent,
+          matchedSkills: JSON.stringify(matchedSkills),
+          missingSkills: JSON.stringify(missingSkills),
+        },
+      });
+      matchScore = this.formatMatchScore(updated);
+    } else {
+      const created = await prisma.resumeMatchScore.create({
+        data: {
+          resumeId: input.resumeId,
+          jobId: input.jobId,
+          overallScore,
+          skillMatchScore: skillMatchPercent,
+          experienceMatchScore: expMatchPercent,
+          educationMatchScore: educationMatchPercent,
+          locationMatchScore: locationMatchPercent,
+          matchedSkills: JSON.stringify(matchedSkills),
+          missingSkills: JSON.stringify(missingSkills),
+        },
+      });
+      matchScore = this.formatMatchScore(created);
     }
 
     return matchScore;
   }
 
   async getMatchScores(resumeId: string): Promise<ResumeMatchScore[]> {
-    const resume = await prisma.candidateResume.findUnique({ where: { id: resumeId }, select: { matchScores: true } });
-    if (!resume) throw new Error("Resume not found");
-    return typeof resume.matchScores === "string" ? JSON.parse(resume.matchScores as string || "[]") : resume.matchScores ?? [];
-  }
-
-  async getTopMatchesForJob(
-    jobId: string, jobTitle: string, requiredSkills: string[],
-    requiredExperience: number, requiredEducation: string | null,
-    preferredLocation: string | null, salaryRange: { min: number; max: number } | null,
-    limit = 20
-  ): Promise<{ resumeId: string; candidateId: string; score: ResumeMatchScore }[]> {
-    const resumes = await prisma.candidateResume.findMany({
-      where: { status: "current", parsedContent: { not: null } },
-      include: { candidate: { include: { skills: true } } },
+    const scores = await prisma.resumeMatchScore.findMany({
+      where: { resumeId },
+      orderBy: { overallScore: "desc" },
     });
+    return scores.map((s) => this.formatMatchScore(s));
+  }
 
-    const scored: { resumeId: string; candidateId: string; score: ResumeMatchScore }[] = [];
+  // ─── ATS Analysis ──────────────────────────────────────────────────────────
 
-    for (const resume of resumes) {
-      try {
-        const score = await this.matchJob({
-          resumeId: resume.id, jobId, jobTitle, requiredSkills,
-          requiredExperience, requiredEducation, preferredLocation, salaryRange,
-        });
-        scored.push({ resumeId: resume.id, candidateId: resume.candidateId, score });
-      } catch { continue; }
+  async analyzeATS(
+    resumeId: string,
+    targetKeywords: string[] = []
+  ): Promise<ATSAnalysis> {
+    const resume = await this.getByIdOrThrow(resumeId);
+    const content = resume.parsedContent ?? "";
+    const parsedData = resume.parsedData as ResumeParsedData | null;
+
+    const contentLower = content.toLowerCase();
+    const foundKeywords = targetKeywords.filter((kw) =>
+      contentLower.includes(kw.toLowerCase())
+    );
+    const missingKeywords = targetKeywords.filter(
+      (kw) => !contentLower.includes(kw.toLowerCase())
+    );
+
+    const formattingIssues: string[] = [];
+    if (content.includes("\t")) formattingIssues.push("Contains tab characters");
+    if (content.length > 10000) formattingIssues.push("Resume may be too long");
+    if (!content.includes("@")) formattingIssues.push("No email address detected");
+    if (!/\d{3}[-.\s]?\d{3}[-.\s]?\d{4}/.test(content)) {
+      formattingIssues.push("No phone number detected");
     }
 
-    return scored.sort((a, b) => b.score.overallScore - a.score.overallScore).slice(0, limit);
-  }
+    const sections = {
+      contact: !!(contentLower.includes("email") || contentLower.includes("@")),
+      summary: !!(
+        contentLower.includes("summary") ||
+        contentLower.includes("objective") ||
+        contentLower.includes("profile")
+      ),
+      experience: !!(
+        contentLower.includes("experience") ||
+        contentLower.includes("employment") ||
+        contentLower.includes("work history")
+      ),
+      education: !!(
+        contentLower.includes("education") ||
+        contentLower.includes("university") ||
+        contentLower.includes("degree")
+      ),
+      skills: !!(
+        contentLower.includes("skills") ||
+        contentLower.includes("technologies") ||
+        contentLower.includes("competencies")
+      ),
+    };
 
-  // ─── Bulk Operations ──────────────────────────────────────────────────────
+    const sectionsPresent = Object.values(sections).filter(Boolean).length;
+    const keywordScore = targetKeywords.length > 0
+      ? Math.round((foundKeywords.length / targetKeywords.length) * 100)
+      : 70;
+    const sectionScore = Math.round((sectionsPresent / 5) * 100);
+    const formattingScore = Math.max(0, 100 - formattingIssues.length * 15);
+    const overallScore = Math.round(
+      keywordScore * 0.4 + sectionScore * 0.35 + formattingScore * 0.25
+    );
 
-  async bulkDelete(resumeIds: string[]): Promise<number> {
-    const result = await prisma.candidateResume.deleteMany({ where: { id: { in: resumeIds } } });
-    return result.count;
-  }
-
-  async getAll(firmId: string, filters?: ResumeFilter, page = 1, limit = 20): Promise<{ resumes: Resume[]; total: number }> {
-    const where: Record<string, unknown> = { candidate: { firmId } };
-    if (filters) {
-      if (filters.candidateId) where.candidateId = filters.candidateId;
-      if (filters.status?.length) where.status = { in: filters.status };
-      if (filters.mimeType?.length) where.mimeType = { in: filters.mimeType };
-      if (filters.dateRange) where.uploadedAt = { gte: filters.dateRange.start, lte: filters.dateRange.end };
+    const recommendations: string[] = [];
+    if (missingKeywords.length > 0) {
+      recommendations.push(
+        `Add these keywords: ${missingKeywords.slice(0, 5).join(", ")}`
+      );
     }
-
-    const skip = (page - 1) * limit;
-    const [resumes, total] = await Promise.all([
-      prisma.candidateResume.findMany({ where, skip, take: limit, orderBy: { uploadedAt: "desc" } }),
-      prisma.candidateResume.count({ where }),
-    ]);
-    return { resumes: resumes.map((r) => this.formatResume(r)), total };
-  }
-
-  async getStats(firmId: string): Promise<ResumeStats> {
-    const [totalResumes, sizeAgg, byMimeType, parsedCount] = await Promise.all([
-      prisma.candidateResume.count({ where: { candidate: { firmId } } }),
-      prisma.candidateResume.aggregate({ where: { candidate: { firmId } }, _sum: { size: true }, _avg: { size: true } }),
-      prisma.candidateResume.groupBy({ by: ["mimeType"], where: { candidate: { firmId } }, _count: true, _sum: { size: true } }),
-      prisma.candidateResume.count({ where: { candidate: { firmId }, parsedContent: { not: null } } }),
-    ]);
+    if (!sections.summary) recommendations.push("Add a professional summary section");
+    if (!sections.skills) recommendations.push("Add a dedicated skills section");
+    if (formattingIssues.includes("Resume may be too long")) {
+      recommendations.push("Keep resume to 2 pages or less");
+    }
 
     return {
-      totalResumes,
-      totalSize: Number(sizeAgg._sum.size ?? 0),
-      averageSize: Number(sizeAgg._avg.size ?? 0),
-      byMimeType: byMimeType.map((m) => ({ mimeType: m.mimeType, count: m._count, totalSize: Number(m._sum.size ?? 0) })),
-      parsedCount,
-      unparsedCount: totalResumes - parsedCount,
-      averageMatchScore: 0,
+      score: overallScore,
+      keywords: foundKeywords,
+      missingKeywords,
+      formattingIssues,
+      recommendations,
+      sections,
     };
   }
 
-  private formatResume(resume: any): Resume {
+  // ─── Analytics ──────────────────────────────────────────────────────────────
+
+  async getStats(firmId: string): Promise<ResumeStats> {
+    const where = {
+      candidate: { firmId },
+    };
+
+    const [total, parsedCount, byMimeType, avgSize] = await Promise.all([
+      prisma.candidateResume.count({ where }),
+      prisma.candidateResume.count({
+        where: { ...where, parsedContent: { not: null } },
+      }),
+      prisma.candidateResume.groupBy({
+        by: ["mimeType"],
+        where,
+        _count: true,
+      }),
+      prisma.candidateResume.aggregate({
+        where,
+        _avg: { size: true },
+      }),
+    ]);
+
+    const matchScores = await prisma.resumeMatchScore.groupBy({
+      by: ["resumeId"],
+      where: { resume: { candidate: { firmId } } },
+      _avg: { overallScore: true },
+    });
+
+    const distribution = [
+      { range: "0-20", count: 0 },
+      { range: "21-40", count: 0 },
+      { range: "41-60", count: 0 },
+      { range: "61-80", count: 0 },
+      { range: "81-100", count: 0 },
+    ];
+
+    for (const ms of matchScores) {
+      const score = ms._avg.overallScore ?? 0;
+      if (score <= 20) distribution[0].count++;
+      else if (score <= 40) distribution[1].count++;
+      else if (score <= 60) distribution[2].count++;
+      else if (score <= 80) distribution[3].count++;
+      else distribution[4].count++;
+    }
+
     return {
-      id: resume.id,
-      candidateId: resume.candidateId,
-      fileName: resume.fileName,
-      originalName: resume.originalName,
-      url: resume.url,
-      storageKey: resume.storageKey,
-      mimeType: resume.mimeType,
-      size: resume.size,
-      status: resume.status,
-      parsedContent: resume.parsedContent,
-      parsedData: resume.parsedData ? (typeof resume.parsedData === "string" ? JSON.parse(resume.parsedData) : resume.parsedData) : null,
-      matchScores: typeof resume.matchScores === "string" ? JSON.parse(resume.matchScores || "[]") : resume.matchScores ?? [],
-      uploadedAt: resume.uploadedAt,
-      lastParsedAt: resume.lastParsedAt,
+      totalResumes: total,
+      parsedCount,
+      unparsedCount: total - parsedCount,
+      averageSize: avgSize._avg.size ?? 0,
+      byMimeType: byMimeType.map((m) => ({
+        mimeType: m.mimeType,
+        count: m._count,
+      })),
+      matchScoreDistribution: distribution,
+    };
+  }
+
+  // ─── Private Helpers ────────────────────────────────────────────────────────
+
+  private buildWhereClause(firmId: string, filters?: ResumeFilter): Record<string, unknown> {
+    const where: Record<string, unknown> = {
+      candidate: { firmId, isActive: true },
+    };
+
+    if (!filters) return where;
+
+    if (filters.candidateId) where.candidateId = filters.candidateId;
+    if (filters.status && filters.status.length > 0) {
+      where.status = { in: filters.status };
+    }
+    if (filters.mimeType && filters.mimeType.length > 0) {
+      where.mimeType = { in: filters.mimeType };
+    }
+    if (filters.dateRange) {
+      where.createdAt = {
+        gte: filters.dateRange.start,
+        lte: filters.dateRange.end,
+      };
+    }
+
+    return where;
+  }
+
+  private formatResume(raw: any): Resume {
+    return {
+      id: raw.id,
+      candidateId: raw.candidateId,
+      fileName: raw.fileName,
+      originalName: raw.originalName,
+      url: raw.url,
+      storageKey: raw.storageKey,
+      mimeType: raw.mimeType,
+      size: raw.size,
+      status: raw.status,
+      parsedContent: raw.parsedContent,
+      parsedData: raw.parsedData
+        ? typeof raw.parsedData === "string"
+          ? JSON.parse(raw.parsedData)
+          : raw.parsedData
+        : null,
+      matchScores: [],
+      uploadedAt: raw.createdAt,
+      lastParsedAt: raw.lastParsedAt,
+    };
+  }
+
+  private formatMatchScore(raw: any): ResumeMatchScore {
+    return {
+      id: raw.id,
+      resumeId: raw.resumeId,
+      jobId: raw.jobId,
+      overallScore: raw.overallScore,
+      skillMatchScore: raw.skillMatchScore,
+      experienceMatchScore: raw.experienceMatchScore,
+      educationMatchScore: raw.educationMatchScore,
+      locationMatchScore: raw.locationMatchScore,
+      matchedSkills: JSON.parse(raw.matchedSkills ?? "[]"),
+      missingSkills: JSON.parse(raw.missingSkills ?? "[]"),
+      createdAt: raw.createdAt,
     };
   }
 }

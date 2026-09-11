@@ -4,17 +4,10 @@ import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
-const acceptOfferSchema = z.object({
-  response: z.enum(["accepted", "declined", "counter_offer"]),
-  counterOffer: z
-    .object({
-      amount: z.number().min(0),
-      reason: z.string().min(1),
-    })
-    .optional(),
-  notes: z.string().optional(),
-  startDate: z.string().datetime().optional(),
-  signedAt: z.string().datetime().optional(),
+const respondOfferSchema = z.object({
+  response: z.enum(["ACCEPTED", "DECLINED", "NEGOTIATING"]),
+  declinedReason: z.string().optional(),
+  negotiationNotes: z.string().optional(),
 });
 
 export async function POST(
@@ -30,13 +23,13 @@ export async function POST(
     const offer = await prisma.offer.findUnique({
       where: { id: params.id },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        application: {
-          include: {
-            job: { select: { id: true, title: true } },
-            _count: { select: { offers: true } },
-          },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
         },
+        jobPosting: {
+          select: { id: true, title: true, vacancies: true },
+        },
+        jobOffer: true,
       },
     });
 
@@ -44,17 +37,17 @@ export async function POST(
       return NextResponse.json({ error: "Offer not found" }, { status: 404 });
     }
 
-    if (offer.status !== "sent" && offer.status !== "negotiating") {
+    if (!["SENT", "VIEWED", "NEGOTIATING"].includes(offer.status)) {
       return NextResponse.json(
         { error: `Cannot respond to an offer with status "${offer.status}"` },
         { status: 400 }
       );
     }
 
-    if (offer.expirationDate && new Date(offer.expirationDate) < new Date()) {
+    if (offer.jobOffer?.expirationDate && new Date(offer.jobOffer.expirationDate) < new Date()) {
       await prisma.offer.update({
         where: { id: params.id },
-        data: { status: "expired" },
+        data: { status: "EXPIRED" },
       });
       return NextResponse.json(
         { error: "This offer has expired" },
@@ -63,125 +56,72 @@ export async function POST(
     }
 
     const body = await request.json();
-    const validated = acceptOfferSchema.parse(body);
+    const validated = respondOfferSchema.parse(body);
 
-    if (validated.response === "counter_offer" && !validated.counterOffer) {
-      return NextResponse.json(
-        { error: "Counter offer details are required" },
-        { status: 400 }
-      );
+    const updateData: any = {
+      status: validated.response,
+      respondedAt: new Date(),
+    };
+
+    if (validated.response === "DECLINED") {
+      updateData.declinedReason = validated.declinedReason;
     }
 
-    let newStatus: string;
-    let updateData: any = {};
-
-    switch (validated.response) {
-      case "accepted":
-        newStatus = "accepted";
-        updateData = {
-          status: newStatus,
-          metadata: {
-            ...((offer.metadata as any) || {}),
-            acceptedAt: validated.signedAt || new Date().toISOString(),
-            acceptedBy: session.user.id,
-            notes: validated.notes,
-          },
-        };
-        break;
-      case "declined":
-        newStatus = "declined";
-        updateData = {
-          status: newStatus,
-          metadata: {
-            ...((offer.metadata as any) || {}),
-            declinedAt: new Date().toISOString(),
-            declinedBy: session.user.id,
-            notes: validated.notes,
-          },
-        };
-        break;
-      case "counter_offer":
-        newStatus = "negotiating";
-        updateData = {
-          status: newStatus,
-          salary: {
-            ...((offer.salary as any) || {}),
-            amount: validated.counterOffer!.amount,
-          },
-          metadata: {
-            ...((offer.metadata as any) || {}),
-            counterOffers: [
-              ...(((offer.metadata as any)?.counterOffers) || []),
-              {
-                amount: validated.counterOffer!.amount,
-                reason: validated.counterOffer!.reason,
-                offeredAt: new Date().toISOString(),
-                offeredBy: session.user.id,
-              },
-            ],
-          },
-        };
-        break;
+    if (validated.response === "NEGOTIATING") {
+      updateData.negotiationNotes = validated.negotiationNotes;
     }
 
-    const [updatedOffer] = await prisma.$transaction([
-      prisma.offer.update({
-        where: { id: params.id },
-        data: updateData,
-        include: {
-          candidate: { select: { id: true, name: true, email: true } },
-          application: { include: { job: { select: { id: true, title: true } } } },
-        },
-      }),
-      prisma.timelineEvent.create({
-        data: {
-          type: "offer_sent",
-          title: `Offer ${validated.response.replace(/_/g, " ")}`,
-          description:
-            validated.response === "counter_offer"
-              ? `Counter offer of ${validated.counterOffer!.amount} submitted`
-              : `Offer ${validated.response} by ${offer.candidate.name}`,
-          metadata: {
-            offerId: params.id,
-            response: validated.response,
-            counterOffer: validated.counterOffer,
-          },
-          applicationId: offer.applicationId,
-        },
-      }),
-    ]);
+    if (validated.response === "ACCEPTED") {
+      updateData.signedAt = new Date();
+    }
 
-    if (validated.response === "accepted") {
-      await prisma.application.update({
+    const updatedOffer = await prisma.offer.update({
+      where: { id: params.id },
+      data: updateData,
+      include: {
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
+        jobPosting: { select: { id: true, title: true } },
+        jobOffer: true,
+      },
+    });
+
+    if (validated.response === "ACCEPTED") {
+      await prisma.jobApplication.update({
         where: { id: offer.applicationId },
-        data: { status: "offer_accepted" },
+        data: { status: "ACCEPTED" },
       });
 
-      await prisma.candidate.update({
-        where: { id: offer.candidateId },
-        data: { status: "hired" },
+      const job = await prisma.jobPosting.findUnique({
+        where: { id: offer.jobId },
+        select: { vacancies: true },
       });
 
-      const job = await prisma.job.findUnique({ where: { id: offer.application.job.id } });
       if (job) {
-        await prisma.job.update({
-          where: { id: offer.application.job.id },
-          data: {
-            filledCount: { increment: 1 },
-            ...(job.headcount <= job.filledCount + 1 ? { status: "closed", filledAt: new Date() } : {}),
-          },
+        const acceptedCount = await prisma.offer.count({
+          where: { jobId: offer.jobId, status: "ACCEPTED" },
         });
+
+        if (acceptedCount >= job.vacancies) {
+          await prisma.jobPosting.update({
+            where: { id: offer.jobId },
+            data: { status: "CLOSED", closedAt: new Date() },
+          });
+        }
       }
-    } else if (validated.response === "declined") {
-      await prisma.application.update({
+    }
+
+    if (validated.response === "DECLINED") {
+      await prisma.jobApplication.update({
         where: { id: offer.applicationId },
-        data: { status: "offer_declined" },
+        data: { status: "REJECTED" },
       });
     }
 
     return NextResponse.json({
       data: updatedOffer,
-      message: `Offer ${validated.response.replace(/_/g, " ")} successfully`,
+      message: `Offer ${validated.response.toLowerCase()} successfully`,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {

@@ -7,7 +7,7 @@ const features = [
   {
     icon: (
       <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" strokeWidth="1.5" stroke="currentColor">
-        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09zM18.259 8.715L18 9.75l-.259-1.035a3.375 3.375 0 00-2.455-2.456L14.25 6l1.036-.259a3.375 3.375 0 002.455-2.456L18 2.25l.259 1.035a3.375 3.375 0 002.455 2.456L21.75 6l-1.036.259a3.375 3.375 0 00-2.455 2.456zM16.894 20.567L16.5 21.75l-.394-1.183a2.25 2.25 0 00-1.423-1.423L13.5 18.75l1.183-.394a2.25 2.25 0 001.423-1.423l.394-1.183.394 1.183a2.25 2.25 0 001.423 1.423l1.183.394-1.183.394a2.25 2.25 0 00-1.423 1.423z" />
+        <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
       </svg>
     ),
     title: "AI-Powered Matching",
@@ -80,6 +80,7 @@ const testimonials = [
     author: "Sarah Mitchell",
     role: "VP of People",
     company: "TechStart Inc.",
+    avatar: "SM",
   },
   {
     quote:
@@ -87,6 +88,7 @@ const testimonials = [
     author: "Michael Rodriguez",
     role: "Head of Talent Acquisition",
     company: "InnovateCorp",
+    avatar: "MR",
   },
   {
     quote:
@@ -94,6 +96,59 @@ const testimonials = [
     author: "Jennifer Park",
     role: "Chief HR Officer",
     company: "GlobalTech",
+    avatar: "JP",
+  },
+];
+
+const pricingPlans = [
+  {
+    name: "Starter",
+    price: "$99",
+    period: "per month",
+    description: "Perfect for small teams getting started with AI recruitment.",
+    features: [
+      "Up to 10 active job postings",
+      "AI-powered candidate matching",
+      "Basic analytics dashboard",
+      "Email support",
+      "5 team members",
+    ],
+    cta: "Start Free Trial",
+    popular: false,
+  },
+  {
+    name: "Professional",
+    price: "$249",
+    period: "per month",
+    description: "For growing teams that need advanced features and integrations.",
+    features: [
+      "Unlimited job postings",
+      "Advanced AI screening & matching",
+      "Custom assessment builder",
+      "Priority support & onboarding",
+      "25 team members",
+      "API access",
+      "Custom integrations",
+    ],
+    cta: "Start Free Trial",
+    popular: true,
+  },
+  {
+    name: "Enterprise",
+    price: "Custom",
+    period: "tailored for you",
+    description: "For large organizations with complex recruitment needs.",
+    features: [
+      "Everything in Professional",
+      "Dedicated account manager",
+      "Custom AI model training",
+      "SSO & advanced security",
+      "Unlimited team members",
+      "SLA guarantee",
+      "On-premise deployment option",
+    ],
+    cta: "Contact Sales",
+    popular: false,
   },
 ];
 
@@ -106,7 +161,7 @@ export default function LandingPage() {
       <header className="sticky top-0 z-50 border-b border-border bg-white/80 backdrop-blur-sm dark:bg-gray-950/80">
         <div className="page-container flex h-16 items-center justify-between">
           <Link href="/" className="flex items-center gap-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-purple-600">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary-600 to-secondary-600">
               <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
               </svg>
@@ -115,24 +170,20 @@ export default function LandingPage() {
           </Link>
 
           <nav className="hidden md:flex md:items-center md:gap-6">
-            <Link href="#features" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
-              Features
-            </Link>
-            <Link href="#pricing" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
-              Pricing
-            </Link>
-            <Link href="#testimonials" className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground">
-              Testimonials
-            </Link>
+            {["Features", "Pricing", "Testimonials"].map((item) => (
+              <Link
+                key={item}
+                href={`#${item.toLowerCase()}`}
+                className="text-sm font-medium text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {item}
+              </Link>
+            ))}
           </nav>
 
           <div className="hidden items-center gap-4 md:flex">
-            <Link href="/login" className="btn-ghost">
-              Log in
-            </Link>
-            <Link href="/register" className="btn-primary">
-              Get Started
-            </Link>
+            <Link href="/login" className="btn-ghost">Log in</Link>
+            <Link href="/register" className="btn-primary">Get Started</Link>
           </div>
 
           <button
@@ -153,15 +204,16 @@ export default function LandingPage() {
         {mobileMenuOpen && (
           <div className="border-t border-border bg-white px-4 py-4 dark:bg-gray-950 md:hidden">
             <nav className="flex flex-col gap-3">
-              <Link href="#features" className="text-sm font-medium text-muted-foreground" onClick={() => setMobileMenuOpen(false)}>
-                Features
-              </Link>
-              <Link href="#pricing" className="text-sm font-medium text-muted-foreground" onClick={() => setMobileMenuOpen(false)}>
-                Pricing
-              </Link>
-              <Link href="#testimonials" className="text-sm font-medium text-muted-foreground" onClick={() => setMobileMenuOpen(false)}>
-                Testimonials
-              </Link>
+              {["Features", "Pricing", "Testimonials"].map((item) => (
+                <Link
+                  key={item}
+                  href={`#${item.toLowerCase()}`}
+                  className="text-sm font-medium text-muted-foreground"
+                  onClick={() => setMobileMenuOpen(false)}
+                >
+                  {item}
+                </Link>
+              ))}
               <hr className="divider my-2" />
               <Link href="/login" className="text-sm font-medium" onClick={() => setMobileMenuOpen(false)}>
                 Log in
@@ -178,8 +230,8 @@ export default function LandingPage() {
         {/* Hero Section */}
         <section className="relative overflow-hidden py-20 sm:py-32">
           <div className="absolute inset-0 -z-10">
-            <div className="absolute -top-40 right-0 h-[500px] w-[500px] rounded-full bg-gradient-to-br from-blue-500/20 to-purple-500/20 blur-3xl" />
-            <div className="absolute -bottom-40 left-0 h-[500px] w-[500px] rounded-full bg-gradient-to-tr from-purple-500/20 to-pink-500/20 blur-3xl" />
+            <div className="absolute -top-40 right-0 h-[500px] w-[500px] rounded-full bg-gradient-to-br from-primary-500/20 to-secondary-500/20 blur-3xl" />
+            <div className="absolute -bottom-40 left-0 h-[500px] w-[500px] rounded-full bg-gradient-to-tr from-secondary-500/20 to-accent-500/20 blur-3xl" />
           </div>
 
           <div className="page-container">
@@ -204,13 +256,13 @@ export default function LandingPage() {
               </p>
 
               <div className="mt-10 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
-                <Link href="/register" className="btn-primary btn-lg w-full sm:w-auto">
+                <Link href="/register" className="btn-primary btn-xl w-full sm:w-auto">
                   Start Free Trial
                   <svg className="ml-2 h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 4.5L21 12m0 0l-7.5 7.5M21 12H3" />
                   </svg>
                 </Link>
-                <Link href="#demo" className="btn-secondary btn-lg w-full sm:w-auto">
+                <Link href="#demo" className="btn-secondary btn-xl w-full sm:w-auto">
                   Watch Demo
                 </Link>
               </div>
@@ -294,12 +346,8 @@ export default function LandingPage() {
                   <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-primary/10 text-primary transition-colors group-hover:bg-primary group-hover:text-primary-foreground">
                     {feature.icon}
                   </div>
-                  <h3 className="mb-2 text-lg font-semibold text-foreground">
-                    {feature.title}
-                  </h3>
-                  <p className="text-sm leading-relaxed text-muted-foreground">
-                    {feature.description}
-                  </p>
+                  <h3 className="mb-2 text-lg font-semibold text-foreground">{feature.title}</h3>
+                  <p className="text-sm leading-relaxed text-muted-foreground">{feature.description}</p>
                 </div>
               ))}
             </div>
@@ -321,12 +369,7 @@ export default function LandingPage() {
                 <div key={testimonial.author} className="card">
                   <div className="mb-4 flex">
                     {[...Array(5)].map((_, i) => (
-                      <svg
-                        key={i}
-                        className="h-5 w-5 text-amber-400"
-                        fill="currentColor"
-                        viewBox="0 0 20 20"
-                      >
+                      <svg key={i} className="h-5 w-5 text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                         <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
                       </svg>
                     ))}
@@ -334,12 +377,74 @@ export default function LandingPage() {
                   <p className="mb-6 text-sm leading-relaxed text-muted-foreground">
                     &ldquo;{testimonial.quote}&rdquo;
                   </p>
-                  <div>
-                    <div className="font-semibold text-foreground">{testimonial.author}</div>
-                    <div className="text-sm text-muted-foreground">
-                      {testimonial.role}, {testimonial.company}
+                  <div className="flex items-center gap-3">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary">
+                      {testimonial.avatar}
+                    </div>
+                    <div>
+                      <div className="font-semibold text-foreground">{testimonial.author}</div>
+                      <div className="text-sm text-muted-foreground">
+                        {testimonial.role}, {testimonial.company}
+                      </div>
                     </div>
                   </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        {/* Pricing Section */}
+        <section id="pricing" className="py-20 sm:py-28">
+          <div className="page-container">
+            <div className="mx-auto max-w-2xl text-center">
+              <h2 className="section-title">Simple, transparent pricing</h2>
+              <p className="section-subtitle">
+                Choose the plan that fits your team. All plans include a 14-day free trial.
+              </p>
+            </div>
+
+            <div className="mx-auto mt-16 grid max-w-5xl gap-8 lg:grid-cols-3">
+              {pricingPlans.map((plan) => (
+                <div
+                  key={plan.name}
+                  className={`card relative ${
+                    plan.popular
+                      ? "border-primary shadow-lg ring-2 ring-primary/20"
+                      : ""
+                  }`}
+                >
+                  {plan.popular && (
+                    <div className="absolute -top-3 left-1/2 -translate-x-1/2">
+                      <span className="badge-primary px-3 py-1 text-xs">Most Popular</span>
+                    </div>
+                  )}
+                  <div className="mb-6">
+                    <h3 className="text-lg font-semibold text-foreground">{plan.name}</h3>
+                    <div className="mt-4 flex items-baseline gap-1">
+                      <span className="text-4xl font-bold text-foreground">{plan.price}</span>
+                      {plan.price !== "Custom" && (
+                        <span className="text-sm text-muted-foreground">/{plan.period}</span>
+                      )}
+                    </div>
+                    <p className="mt-2 text-sm text-muted-foreground">{plan.description}</p>
+                  </div>
+                  <ul className="mb-8 space-y-3">
+                    {plan.features.map((feature) => (
+                      <li key={feature} className="flex items-start gap-3 text-sm text-muted-foreground">
+                        <svg className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M4.5 12.75l6 6 9-13.5" />
+                        </svg>
+                        {feature}
+                      </li>
+                    ))}
+                  </ul>
+                  <Link
+                    href={plan.price === "Custom" ? "/contact" : "/register"}
+                    className={`w-full ${plan.popular ? "btn-primary" : "btn-outline"}`}
+                  >
+                    {plan.cta}
+                  </Link>
                 </div>
               ))}
             </div>
@@ -349,10 +454,10 @@ export default function LandingPage() {
         {/* CTA Section */}
         <section className="py-20 sm:py-28">
           <div className="page-container">
-            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-blue-600 to-purple-600 px-8 py-16 text-center sm:px-16">
+            <div className="relative overflow-hidden rounded-2xl bg-gradient-to-br from-primary-600 to-secondary-600 px-8 py-16 text-center sm:px-16">
               <div className="absolute inset-0 -z-10">
                 <div className="absolute -right-20 -top-20 h-64 w-64 rounded-full bg-white/10 blur-3xl" />
-                <div className="absolute -bottom-20 -left-20 h-64 w-64 rounded-full bg-purple-500/30 blur-3xl" />
+                <div className="absolute -bottom-20 -left-20 h-64 w-64 rounded-full bg-secondary-500/30 blur-3xl" />
               </div>
               <h2 className="text-3xl font-bold text-white sm:text-4xl">
                 Ready to transform your hiring?
@@ -364,7 +469,7 @@ export default function LandingPage() {
               <div className="mt-8 flex flex-col items-center gap-4 sm:flex-row sm:justify-center">
                 <Link
                   href="/register"
-                  className="inline-flex items-center justify-center rounded-xl bg-white px-8 py-4 text-base font-semibold text-blue-600 shadow-lg transition-all hover:bg-blue-50 hover:shadow-xl"
+                  className="inline-flex items-center justify-center rounded-xl bg-white px-8 py-4 text-base font-semibold text-primary-600 shadow-lg transition-all hover:bg-blue-50 hover:shadow-xl"
                 >
                   Start Free Trial
                   <svg className="ml-2 h-4 w-4" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
@@ -389,7 +494,7 @@ export default function LandingPage() {
           <div className="grid gap-8 md:grid-cols-4">
             <div>
               <Link href="/" className="flex items-center gap-2">
-                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-blue-600 to-purple-600">
+                <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary-600 to-secondary-600">
                   <svg className="h-5 w-5 text-white" fill="none" viewBox="0 0 24 24" strokeWidth="2" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" d="M9.813 15.904L9 18.75l-.813-2.846a4.5 4.5 0 00-3.09-3.09L2.25 12l2.846-.813a4.5 4.5 0 003.09-3.09L9 5.25l.813 2.846a4.5 4.5 0 003.09 3.09L15.75 12l-2.846.813a4.5 4.5 0 00-3.09 3.09z" />
                   </svg>
@@ -403,27 +508,37 @@ export default function LandingPage() {
             <div>
               <h3 className="mb-3 text-sm font-semibold text-foreground">Product</h3>
               <ul className="space-y-2">
-                <li><Link href="#features" className="text-sm text-muted-foreground hover:text-foreground">Features</Link></li>
-                <li><Link href="#pricing" className="text-sm text-muted-foreground hover:text-foreground">Pricing</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Integrations</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">API</Link></li>
+                {["Features", "Pricing", "Integrations", "API"].map((item) => (
+                  <li key={item}>
+                    <Link href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+                      {item}
+                    </Link>
+                  </li>
+                ))}
               </ul>
             </div>
             <div>
               <h3 className="mb-3 text-sm font-semibold text-foreground">Company</h3>
               <ul className="space-y-2">
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">About</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Blog</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Careers</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Contact</Link></li>
+                {["About", "Blog", "Careers", "Contact"].map((item) => (
+                  <li key={item}>
+                    <Link href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+                      {item}
+                    </Link>
+                  </li>
+                ))}
               </ul>
             </div>
             <div>
               <h3 className="mb-3 text-sm font-semibold text-foreground">Legal</h3>
               <ul className="space-y-2">
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Privacy Policy</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Terms of Service</Link></li>
-                <li><Link href="#" className="text-sm text-muted-foreground hover:text-foreground">Cookie Policy</Link></li>
+                {["Privacy Policy", "Terms of Service", "Cookie Policy"].map((item) => (
+                  <li key={item}>
+                    <Link href="#" className="text-sm text-muted-foreground hover:text-foreground transition-colors">
+                      {item}
+                    </Link>
+                  </li>
+                ))}
               </ul>
             </div>
           </div>

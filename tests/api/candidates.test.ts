@@ -9,9 +9,20 @@ const mockPrisma = {
     delete: vi.fn(),
     count: vi.fn(),
   },
-  resume: {
+  candidateSkill: {
+    createMany: vi.fn(),
+    deleteMany: vi.fn(),
     findMany: vi.fn(),
+  },
+  candidateExperience: {
+    createMany: vi.fn(),
+    deleteMany: vi.fn(),
+  },
+  candidateResume: {
     create: vi.fn(),
+    findMany: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
   },
 };
 
@@ -27,164 +38,247 @@ describe("Candidates API", () => {
 
   describe("GET /api/candidates", () => {
     it("returns paginated candidates", async () => {
-      const candidates = [
-        { id: "1", firstName: "John", lastName: "Doe" },
-        { id: "2", firstName: "Jane", lastName: "Smith" },
+      const mockCandidates = [
+        { id: "1", firstName: "Alice", lastName: "Smith", email: "alice@test.com" },
+        { id: "2", firstName: "Bob", lastName: "Jones", email: "bob@test.com" },
       ];
-      mockPrisma.candidate.findMany.mockResolvedValue(candidates);
+      mockPrisma.candidate.findMany.mockResolvedValue(mockCandidates);
       mockPrisma.candidate.count.mockResolvedValue(2);
 
-      const result = await mockPrisma.candidate.findMany({
+      const candidates = await mockPrisma.candidate.findMany({
         take: 20,
         skip: 0,
       });
+      const total = await mockPrisma.candidate.count();
 
-      expect(result).toHaveLength(2);
+      expect(candidates).toHaveLength(2);
+      expect(total).toBe(2);
     });
 
-    it("filters by status", async () => {
+    it("filters candidates by skills", async () => {
       mockPrisma.candidate.findMany.mockResolvedValue([]);
-      await mockPrisma.candidate.findMany({
-        where: { status: "active" },
-      });
-      expect(mockPrisma.candidate.findMany).toHaveBeenCalled();
-    });
 
-    it("filters by skills", async () => {
-      mockPrisma.candidate.findMany.mockResolvedValue([]);
       await mockPrisma.candidate.findMany({
         where: {
           skills: {
-            some: { skillName: "React" },
+            some: {
+              name: { contains: "TypeScript", mode: "insensitive" },
+            },
           },
         },
       });
+
       expect(mockPrisma.candidate.findMany).toHaveBeenCalled();
     });
 
-    it("searches by name or email", async () => {
+    it("filters candidates by experience level", async () => {
       mockPrisma.candidate.findMany.mockResolvedValue([]);
+
+      await mockPrisma.candidate.findMany({
+        where: {
+          expectedExperienceLevel: "SENIOR",
+        },
+      });
+
+      expect(mockPrisma.candidate.findMany).toHaveBeenCalled();
+    });
+
+    it("searches candidates by name or email", async () => {
+      mockPrisma.candidate.findMany.mockResolvedValue([]);
+
       await mockPrisma.candidate.findMany({
         where: {
           OR: [
-            { firstName: { contains: "john", mode: "insensitive" } },
-            { lastName: { contains: "john", mode: "insensitive" } },
-            { email: { contains: "john", mode: "insensitive" } },
+            { firstName: { contains: "alice", mode: "insensitive" } },
+            { lastName: { contains: "alice", mode: "insensitive" } },
+            { email: { contains: "alice", mode: "insensitive" } },
           ],
         },
       });
+
       expect(mockPrisma.candidate.findMany).toHaveBeenCalled();
-    });
-  });
-
-  describe("GET /api/candidates/:id", () => {
-    it("returns a single candidate", async () => {
-      const candidate = { id: "1", firstName: "John", lastName: "Doe" };
-      mockPrisma.candidate.findUnique.mockResolvedValue(candidate);
-
-      const result = await mockPrisma.candidate.findUnique({
-        where: { id: "1" },
-      });
-
-      expect(result?.firstName).toBe("John");
-    });
-
-    it("returns null for non-existent candidate", async () => {
-      mockPrisma.candidate.findUnique.mockResolvedValue(null);
-      const result = await mockPrisma.candidate.findUnique({
-        where: { id: "nonexistent" },
-      });
-      expect(result).toBeNull();
     });
   });
 
   describe("POST /api/candidates", () => {
-    it("creates a new candidate", async () => {
-      const newCandidate = {
+    it("creates a new candidate profile", async () => {
+      const candidateData = {
         firstName: "Alice",
-        lastName: "Johnson",
-        email: "alice@example.com",
+        lastName: "Smith",
+        email: "alice@test.com",
+        headline: "Senior Software Engineer",
+        summary: "10+ years of experience",
+        workPreference: "REMOTE",
       };
-      mockPrisma.candidate.create.mockResolvedValue({ id: "3", ...newCandidate });
+
+      mockPrisma.candidate.create.mockResolvedValue({
+        id: "candidate-123",
+        ...candidateData,
+        isAvailable: true,
+        profileCompleteness: 45,
+        createdAt: new Date(),
+      });
 
       const created = await mockPrisma.candidate.create({
-        data: newCandidate,
+        data: candidateData,
       });
 
       expect(created.firstName).toBe("Alice");
+      expect(created.lastName).toBe("Smith");
+      expect(created.email).toBe("alice@test.com");
     });
 
-    it("validates required fields", () => {
-      const required = ["firstName", "lastName", "email", "firmId"];
-      expect(required).toContain("email");
+    it("calculates profile completeness", () => {
+      const fields = {
+        headline: true,
+        summary: true,
+        education: true,
+        experience: true,
+        skills: true,
+        resume: false,
+        links: false,
+        preferences: true,
+      };
+
+      const filled = Object.values(fields).filter(Boolean).length;
+      const total = Object.keys(fields).length;
+      const completeness = Math.round((filled / total) * 100);
+
+      expect(completeness).toBe(63);
     });
   });
 
   describe("PUT /api/candidates/:id", () => {
     it("updates candidate profile", async () => {
-      const updated = { id: "1", firstName: "Updated" };
+      const updated = {
+        id: "candidate-123",
+        headline: "Lead Software Engineer",
+        summary: "Updated summary with 12 years of experience",
+      };
+
       mockPrisma.candidate.update.mockResolvedValue(updated);
 
       const result = await mockPrisma.candidate.update({
-        where: { id: "1" },
-        data: { firstName: "Updated" },
+        where: { id: "candidate-123" },
+        data: {
+          headline: updated.headline,
+          summary: updated.summary,
+        },
       });
 
-      expect(result.firstName).toBe("Updated");
+      expect(result.headline).toBe("Lead Software Engineer");
     });
 
-    it("updates candidate status", async () => {
-      mockPrisma.candidate.update.mockResolvedValue({ id: "1", status: "hired" });
-      const result = await mockPrisma.candidate.update({
-        where: { id: "1" },
-        data: { status: "hired" },
+    it("updates candidate availability", async () => {
+      mockPrisma.candidate.update.mockResolvedValue({
+        id: "candidate-123",
+        isAvailable: false,
       });
-      expect(result.status).toBe("hired");
+
+      const result = await mockPrisma.candidate.update({
+        where: { id: "candidate-123" },
+        data: { isAvailable: false },
+      });
+
+      expect(result.isAvailable).toBe(false);
+    });
+  });
+
+  describe("Candidate skills", () => {
+    it("adds skills to candidate", async () => {
+      const skills = [
+        { name: "TypeScript", level: "ADVANCED", yearsOfExperience: 5 },
+        { name: "React", level: "EXPERT", yearsOfExperience: 7 },
+      ];
+
+      mockPrisma.candidateSkill.createMany.mockResolvedValue({ count: 2 });
+
+      const result = await mockPrisma.candidateSkill.createMany({
+        data: skills.map((s) => ({
+          candidateId: "candidate-123",
+          ...s,
+        })),
+      });
+
+      expect(result.count).toBe(2);
+    });
+
+    it("removes all skills for candidate", async () => {
+      mockPrisma.candidateSkill.deleteMany.mockResolvedValue({ count: 3 });
+
+      const result = await mockPrisma.candidateSkill.deleteMany({
+        where: { candidateId: "candidate-123" },
+      });
+
+      expect(result.count).toBe(3);
+    });
+
+    it("validates skill levels", () => {
+      const validLevels = ["BEGINNER", "INTERMEDIATE", "ADVANCED", "EXPERT", "MASTER"];
+      expect(validLevels).toContain("ADVANCED");
+      expect(validLevels).not.toContain("beginner");
+    });
+  });
+
+  describe("Resume management", () => {
+    it("uploads a resume", async () => {
+      const resume = {
+        id: "resume-123",
+        title: "Software Engineer Resume",
+        fileName: "resume.pdf",
+        fileSize: 1024000,
+        mimeType: "application/pdf",
+        isDefault: true,
+        status: "UPLOADING",
+      };
+
+      mockPrisma.candidateResume.create.mockResolvedValue(resume);
+
+      const created = await mockPrisma.candidateResume.create({
+        data: {
+          candidateId: "candidate-123",
+          ...resume,
+        },
+      });
+
+      expect(created.fileName).toBe("resume.pdf");
+      expect(created.fileSize).toBe(1024000);
+    });
+
+    it("validates file size limits", () => {
+      const maxFileSize = 10 * 1024 * 1024;
+      const validFile = 1024000;
+      const invalidFile = 20 * 1024 * 1024;
+
+      expect(validFile).toBeLessThanOrEqual(maxFileSize);
+      expect(invalidFile).toBeGreaterThan(maxFileSize);
+    });
+
+    it("validates allowed mime types", () => {
+      const allowedTypes = [
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ];
+
+      expect(allowedTypes).toContain("application/pdf");
+      expect(allowedTypes).not.toContain("image/png");
     });
   });
 
   describe("DELETE /api/candidates/:id", () => {
-    it("deletes a candidate", async () => {
-      mockPrisma.candidate.delete.mockResolvedValue({ id: "1" });
-      const result = await mockPrisma.candidate.delete({ where: { id: "1" } });
-      expect(result.id).toBe("1");
-    });
-  });
-
-  describe("Resume operations", () => {
-    it("lists candidate resumes", async () => {
-      const resumes = [{ id: "r1", fileName: "resume.pdf" }];
-      mockPrisma.resume.findMany.mockResolvedValue(resumes);
-
-      const result = await mockPrisma.resume.findMany({
-        where: { candidateId: "1" },
+    it("soft-deletes a candidate", async () => {
+      mockPrisma.candidate.update.mockResolvedValue({
+        id: "candidate-123",
+        isAvailable: false,
       });
 
-      expect(result).toHaveLength(1);
-    });
-
-    it("creates a resume record", async () => {
-      const resume = { id: "r1", fileName: "resume.pdf", candidateId: "1" };
-      mockPrisma.resume.create.mockResolvedValue(resume);
-
-      const created = await mockPrisma.resume.create({ data: resume });
-      expect(created.fileName).toBe("resume.pdf");
-    });
-  });
-
-  describe("Candidate statistics", () => {
-    it("counts candidates by status", async () => {
-      mockPrisma.candidate.count
-        .mockResolvedValueOnce(50)
-        .mockResolvedValueOnce(20);
-
-      const total = await mockPrisma.candidate.count();
-      const active = await mockPrisma.candidate.count({
-        where: { status: "active" },
+      const result = await mockPrisma.candidate.update({
+        where: { id: "candidate-123" },
+        data: { isAvailable: false },
       });
 
-      expect(total).toBe(50);
-      expect(active).toBe(20);
+      expect(result.isAvailable).toBe(false);
     });
   });
 });

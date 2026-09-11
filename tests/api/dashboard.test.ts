@@ -1,22 +1,25 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 const mockPrisma = {
-  job: {
+  jobPosting: {
+    count: vi.fn(),
+    findMany: vi.fn(),
+  },
+  jobApplication: {
     count: vi.fn(),
     findMany: vi.fn(),
   },
   candidate: {
     count: vi.fn(),
-  },
-  application: {
-    count: vi.fn(),
     findMany: vi.fn(),
   },
   interview: {
     count: vi.fn(),
+    findMany: vi.fn(),
   },
   offer: {
     count: vi.fn(),
+    findMany: vi.fn(),
   },
 };
 
@@ -31,134 +34,208 @@ describe("Dashboard API", () => {
   });
 
   describe("GET /api/dashboard/stats", () => {
-    it("returns total job counts", async () => {
-      mockPrisma.job.count
+    it("returns job statistics", async () => {
+      mockPrisma.jobPosting.count
+        .mockResolvedValueOnce(10)
+        .mockResolvedValueOnce(5)
+        .mockResolvedValueOnce(3)
+        .mockResolvedValueOnce(2);
+
+      const totalJobs = await mockPrisma.jobPosting.count();
+      const openJobs = await mockPrisma.jobPosting.count({
+        where: { status: "PUBLISHED" },
+      });
+      const draftJobs = await mockPrisma.jobPosting.count({
+        where: { status: "DRAFT" },
+      });
+      const closedJobs = await mockPrisma.jobPosting.count({
+        where: { status: "CLOSED" },
+      });
+
+      expect(totalJobs).toBe(10);
+      expect(openJobs).toBe(5);
+      expect(draftJobs).toBe(3);
+      expect(closedJobs).toBe(2);
+    });
+
+    it("returns application statistics", async () => {
+      mockPrisma.jobApplication.count
+        .mockResolvedValueOnce(50)
         .mockResolvedValueOnce(20)
-        .mockResolvedValueOnce(12);
+        .mockResolvedValueOnce(15)
+        .mockResolvedValueOnce(10)
+        .mockResolvedValueOnce(5);
 
-      const total = await mockPrisma.job.count();
-      const active = await mockPrisma.job.count({
-        where: { status: "open" },
+      const total = await mockPrisma.jobApplication.count();
+      const submitted = await mockPrisma.jobApplication.count({
+        where: { status: "SUBMITTED" },
+      });
+      const reviewing = await mockPrisma.jobApplication.count({
+        where: { status: "UNDER_REVIEW" },
+      });
+      const interviewing = await mockPrisma.jobApplication.count({
+        where: { status: "INTERVIEW_SCHEDULED" },
+      });
+      const offered = await mockPrisma.jobApplication.count({
+        where: { status: "OFFERED" },
       });
 
-      expect(total).toBe(20);
-      expect(active).toBe(12);
+      expect(total).toBe(50);
+      expect(submitted).toBe(20);
+      expect(reviewing).toBe(15);
+      expect(interviewing).toBe(10);
+      expect(offered).toBe(5);
     });
 
-    it("returns candidate counts", async () => {
-      mockPrisma.candidate.count.mockResolvedValue(150);
-      const count = await mockPrisma.candidate.count();
-      expect(count).toBe(150);
+    it("returns candidate count", async () => {
+      mockPrisma.candidate.count.mockResolvedValue(120);
+
+      const total = await mockPrisma.candidate.count();
+      expect(total).toBe(120);
     });
 
-    it("returns application counts", async () => {
-      mockPrisma.application.count
-        .mockResolvedValueOnce(200)
-        .mockResolvedValueOnce(50);
+    it("calculates conversion rates", () => {
+      const stats = {
+        applications: 100,
+        screened: 60,
+        interviewed: 25,
+        offered: 8,
+        hired: 5,
+      };
 
-      const total = await mockPrisma.application.count();
-      const pending = await mockPrisma.application.count({
-        where: { status: { in: ["submitted", "screening", "review"] } },
-      });
+      const screeningRate = (stats.screened / stats.applications) * 100;
+      const interviewRate = (stats.interviewed / stats.screened) * 100;
+      const offerRate = (stats.offered / stats.interviewed) * 100;
+      const acceptanceRate = (stats.hired / stats.offered) * 100;
 
-      expect(total).toBe(200);
-      expect(pending).toBe(50);
-    });
-
-    it("returns interview counts", async () => {
-      mockPrisma.interview.count.mockResolvedValue(15);
-      const count = await mockPrisma.interview.count({
-        where: { status: "scheduled" },
-      });
-      expect(count).toBe(15);
+      expect(screeningRate).toBe(60);
+      expect(interviewRate).toBeCloseTo(41.67);
+      expect(offerRate).toBe(32);
+      expect(acceptanceRate).toBeCloseTo(62.5);
     });
   });
 
-  describe("GET /api/dashboard/activity", () => {
-    it("returns recent activity", async () => {
-      const activities = [
-        { id: "1", type: "application", createdAt: new Date() },
-        { id: "2", type: "status_change", createdAt: new Date() },
+  describe("GET /api/dashboard/recent-activity", () => {
+    it("returns recent job postings", async () => {
+      const recentJobs = [
+        { id: "job-1", title: "Senior Engineer", createdAt: new Date() },
+        { id: "job-2", title: "Product Designer", createdAt: new Date() },
       ];
-      mockPrisma.application.findMany.mockResolvedValue(activities);
 
-      const result = await mockPrisma.application.findMany({
-        take: 10,
+      mockPrisma.jobPosting.findMany.mockResolvedValue(recentJobs);
+
+      const jobs = await mockPrisma.jobPosting.findMany({
         orderBy: { createdAt: "desc" },
+        take: 5,
       });
 
-      expect(result).toHaveLength(2);
+      expect(jobs).toHaveLength(2);
+    });
+
+    it("returns recent applications", async () => {
+      const recentApps = [
+        { id: "app-1", status: "SUBMITTED", createdAt: new Date() },
+        { id: "app-2", status: "UNDER_REVIEW", createdAt: new Date() },
+      ];
+
+      mockPrisma.jobApplication.findMany.mockResolvedValue(recentApps);
+
+      const apps = await mockPrisma.jobApplication.findMany({
+        orderBy: { createdAt: "desc" },
+        take: 10,
+      });
+
+      expect(apps).toHaveLength(2);
+    });
+
+    it("returns upcoming interviews", async () => {
+      const now = new Date();
+      const upcoming = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+      const interviews = [
+        {
+          id: "int-1",
+          scheduledAt: upcoming,
+          status: "SCHEDULED",
+        },
+      ];
+
+      mockPrisma.interview.findMany.mockResolvedValue(interviews);
+
+      const result = await mockPrisma.interview.findMany({
+        where: {
+          scheduledAt: { gte: now },
+          status: "SCHEDULED",
+        },
+        orderBy: { scheduledAt: "asc" },
+        take: 5,
+      });
+
+      expect(result).toHaveLength(1);
     });
   });
 
   describe("GET /api/dashboard/charts", () => {
-    it("returns applications by status", async () => {
-      const statusCounts = {
-        submitted: 50,
-        screening: 30,
-        review: 20,
-        phone_interview: 15,
-        technical_interview: 10,
-        hired: 5,
-        rejected: 20,
-      };
-
-      const total = Object.values(statusCounts).reduce((a, b) => a + b, 0);
-      expect(total).toBe(150);
-    });
-
-    it("returns hiring pipeline data", () => {
-      const pipeline = [
-        { stage: "Applied", count: 200 },
-        { stage: "Screening", count: 100 },
-        { stage: "Interview", count: 50 },
-        { stage: "Offer", count: 15 },
-        { stage: "Hired", count: 10 },
+    it("calculates monthly hiring data", () => {
+      const monthlyData = [
+        { month: "2024-01", hires: 5 },
+        { month: "2024-02", hires: 8 },
+        { month: "2024-03", hires: 12 },
+        { month: "2024-04", hires: 7 },
+        { month: "2024-05", hires: 15 },
+        { month: "2024-06", hires: 10 },
       ];
 
-      expect(pipeline).toHaveLength(5);
-      expect(pipeline[0].count).toBeGreaterThan(pipeline[4].count);
+      expect(monthlyData).toHaveLength(6);
+      expect(monthlyData[2].hires).toBe(12);
     });
 
-    it("returns time-to-hire metrics", () => {
-      const metrics = {
-        averageDays: 32,
-        medianDays: 28,
-        minDays: 14,
-        maxDays: 60,
-      };
+    it("calculates applications by source", () => {
+      const sources = [
+        { source: "LinkedIn", count: 45 },
+        { source: "Indeed", count: 30 },
+        { source: "Referral", count: 20 },
+        { source: "Direct", count: 15 },
+      ];
 
-      expect(metrics.averageDays).toBeGreaterThan(0);
-      expect(metrics.minDays).toBeLessThan(metrics.maxDays);
+      const total = sources.reduce((sum, s) => sum + s.count, 0);
+      expect(total).toBe(110);
+      expect(sources[0].source).toBe("LinkedIn");
+    });
+
+    it("calculates top skills in demand", () => {
+      const skills = [
+        { skill: "TypeScript", demand: 85 },
+        { skill: "React", demand: 72 },
+        { skill: "Node.js", demand: 65 },
+        { skill: "Python", demand: 58 },
+        { skill: "AWS", demand: 45 },
+      ];
+
+      expect(skills).toHaveLength(5);
+      expect(skills[0].demand).toBeGreaterThan(skills[4].demand);
     });
   });
 
-  describe("GET /api/dashboard/hiring-rate", () => {
-    it("calculates hiring rate", async () => {
-      const applications = 200;
-      const hired = 15;
-      const rate = (hired / applications) * 100;
-      expect(rate).toBe(7.5);
+  describe("GET /api/dashboard/hiring-pipeline", () => {
+    it("returns pipeline stages with counts", async () => {
+      const pipelineStages = [
+        { stage: "Applied", count: 100 },
+        { stage: "Screening", count: 60 },
+        { stage: "Interview", count: 25 },
+        { stage: "Offer", count: 8 },
+        { stage: "Hired", count: 5 },
+      ];
+
+      expect(pipelineStages).toHaveLength(5);
+      expect(pipelineStages[0].count).toBeGreaterThan(pipelineStages[4].count);
     });
 
-    it("calculates conversion rates between stages", () => {
-      const stages = {
-        applied: 200,
-        screening: 100,
-        interview: 50,
-        offer: 15,
-        hired: 10,
-      };
+    it("calculates average time to fill", () => {
+      const fillTimes = [15, 22, 30, 18, 25, 12, 28];
+      const avgTime = fillTimes.reduce((a, b) => a + b, 0) / fillTimes.length;
 
-      const conversionRates = {
-        screening: (stages.screening / stages.applied) * 100,
-        interview: (stages.interview / stages.screening) * 100,
-        offer: (stages.offer / stages.interview) * 100,
-        hired: (stages.hired / stages.offer) * 100,
-      };
-
-      expect(conversionRates.screening).toBe(50);
-      expect(conversionRates.hired).toBeCloseTo(66.67, 0);
+      expect(avgTime).toBeCloseTo(21.43);
     });
   });
 });

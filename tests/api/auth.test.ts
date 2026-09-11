@@ -5,6 +5,13 @@ const mockPrisma = {
     findUnique: vi.fn(),
     create: vi.fn(),
     update: vi.fn(),
+    delete: vi.fn(),
+    count: vi.fn(),
+  },
+  session: {
+    create: vi.fn(),
+    delete: vi.fn(),
+    findUnique: vi.fn(),
   },
   account: {
     upsert: vi.fn(),
@@ -17,11 +24,15 @@ vi.mock("@/lib/db", () => ({
   prisma: mockPrisma,
 }));
 
+const mockBcrypt = {
+  hash: vi.fn().mockResolvedValue("$2a$10$hashedpassword"),
+  compare: vi.fn().mockResolvedValue(true),
+};
+
 vi.mock("bcryptjs", () => ({
-  default: {
-    hash: vi.fn().mockResolvedValue("$2a$10$hashed"),
-    compare: vi.fn().mockResolvedValue(true),
-  },
+  default: mockBcrypt,
+  hash: mockBcrypt.hash,
+  compare: mockBcrypt.compare,
 }));
 
 describe("Auth API", () => {
@@ -30,147 +41,219 @@ describe("Auth API", () => {
   });
 
   describe("POST /api/auth/register", () => {
-    it("creates a new user", async () => {
-      const user = {
-        id: "u-1",
-        email: "new@example.com",
-        name: "New User",
-        role: "recruiter",
+    it("registers a new user with valid data", async () => {
+      const userData = {
+        name: "John Doe",
+        email: "john@example.com",
+        password: "Password123",
+        role: "CANDIDATE",
       };
-      mockPrisma.user.create.mockResolvedValue(user);
 
+      mockPrisma.user.findUnique.mockResolvedValue(null);
+      mockPrisma.user.create.mockResolvedValue({
+        id: "user-123",
+        ...userData,
+        passwordHash: "$2a$10$hashedpassword",
+        isActive: true,
+        createdAt: new Date(),
+      });
+
+      mockBcrypt.hash.mockResolvedValue("$2a$10$hashedpassword");
+
+      const existingUser = await mockPrisma.user.findUnique({
+        where: { email: userData.email },
+      });
+
+      expect(existingUser).toBeNull();
+
+      const hashedPassword = await mockBcrypt.hash(userData.password, 12);
       const created = await mockPrisma.user.create({
         data: {
-          email: "new@example.com",
-          name: "New User",
-          passwordHash: "$2a$10$hashed",
-          role: "recruiter",
+          name: userData.name,
+          email: userData.email,
+          passwordHash: hashedPassword,
+          role: userData.role,
         },
       });
 
-      expect(created.email).toBe("new@example.com");
+      expect(created.email).toBe(userData.email);
+      expect(created.name).toBe(userData.name);
     });
 
-    it("prevents duplicate emails", async () => {
+    it("rejects duplicate email", async () => {
       mockPrisma.user.findUnique.mockResolvedValue({
         id: "existing",
-        email: "taken@example.com",
+        email: "john@example.com",
       });
 
       const existing = await mockPrisma.user.findUnique({
-        where: { email: "taken@example.com" },
+        where: { email: "john@example.com" },
       });
 
       expect(existing).not.toBeNull();
     });
 
-    it("validates required fields", () => {
-      const required = ["email", "password", "name"];
-      expect(required).toContain("email");
+    it("validates password requirements", () => {
+      const validatePassword = (password: string): boolean => {
+        if (password.length < 8) return false;
+        if (!/[A-Z]/.test(password)) return false;
+        if (!/[a-z]/.test(password)) return false;
+        if (!/[0-9]/.test(password)) return false;
+        return true;
+      };
+
+      expect(validatePassword("short")).toBe(false);
+      expect(validatePassword("alllowercase1")).toBe(false);
+      expect(validatePassword("ALLUPPERCASE1")).toBe(false);
+      expect(validatePassword("NoNumbers")).toBe(false);
+      expect(validatePassword("ValidPass1")).toBe(true);
+    });
+
+    it("validates email format", () => {
+      const validateEmail = (email: string): boolean => {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+      };
+
+      expect(validateEmail("invalid")).toBe(false);
+      expect(validateEmail("@example.com")).toBe(false);
+      expect(validateEmail("user@")).toBe(false);
+      expect(validateEmail("user@example.com")).toBe(true);
     });
   });
 
   describe("POST /api/auth/login", () => {
-    it("authenticates valid credentials", async () => {
-      const user = {
-        id: "u-1",
-        email: "user@example.com",
-        passwordHash: "$2a$10$hashed",
+    it("logs in with valid credentials", async () => {
+      const mockUser = {
+        id: "user-123",
+        email: "john@example.com",
+        passwordHash: "$2a$10$hashedpassword",
         isActive: true,
+        role: "CANDIDATE",
       };
-      mockPrisma.user.findUnique.mockResolvedValue(user);
 
-      const found = await mockPrisma.user.findUnique({
-        where: { email: "user@example.com" },
+      mockPrisma.user.findUnique.mockResolvedValue(mockUser);
+      mockBcrypt.compare.mockResolvedValue(true);
+      mockPrisma.user.update.mockResolvedValue(mockUser);
+
+      const user = await mockPrisma.user.findUnique({
+        where: { email: "john@example.com" },
       });
 
-      expect(found).not.toBeNull();
-      expect(found?.isActive).toBe(true);
+      expect(user).not.toBeNull();
+
+      const isValid = await mockBcrypt.compare(
+        "Password123",
+        user!.passwordHash
+      );
+      expect(isValid).toBe(true);
+    });
+
+    it("rejects invalid credentials", async () => {
+      mockPrisma.user.findUnique.mockResolvedValue(null);
+
+      const user = await mockPrisma.user.findUnique({
+        where: { email: "nonexistent@example.com" },
+      });
+
+      expect(user).toBeNull();
     });
 
     it("rejects inactive accounts", async () => {
-      const user = {
-        id: "u-1",
-        email: "inactive@example.com",
-        passwordHash: "$2a$10$hashed",
+      const mockUser = {
+        id: "user-123",
+        email: "john@example.com",
+        passwordHash: "$2a$10$hashedpassword",
         isActive: false,
       };
-      mockPrisma.user.findUnique.mockResolvedValue(user);
 
-      const found = await mockPrisma.user.findUnique({
-        where: { email: "inactive@example.com" },
-      });
-
-      expect(found?.isActive).toBe(false);
-    });
-
-    it("rejects non-existent users", async () => {
-      mockPrisma.user.findUnique.mockResolvedValue(null);
-      const found = await mockPrisma.user.findUnique({
-        where: { email: "nobody@example.com" },
-      });
-      expect(found).toBeNull();
-    });
-  });
-
-  describe("OAuth sign-in", () => {
-    it("upserts account on OAuth sign-in", async () => {
-      mockPrisma.account.upsert.mockResolvedValue({});
-
-      await mockPrisma.account.upsert({
-        where: {
-          provider_providerAccountId: {
-            provider: "google",
-            providerAccountId: "google-123",
-          },
-        },
-        update: {},
-        create: {
-          userId: "u-1",
-          type: "oauth",
-          provider: "google",
-          providerAccountId: "google-123",
-        },
-      });
-
-      expect(mockPrisma.account.upsert).toHaveBeenCalled();
-    });
-
-    it("finds existing user by email", async () => {
-      mockPrisma.user.findUnique.mockResolvedValue({
-        id: "u-1",
-        email: "user@example.com",
-      });
+      mockPrisma.user.findUnique.mockResolvedValue(mockUser);
 
       const user = await mockPrisma.user.findUnique({
-        where: { email: "user@example.com" },
+        where: { email: "john@example.com" },
       });
 
-      expect(user?.id).toBe("u-1");
+      expect(user!.isActive).toBe(false);
+    });
+
+    it("updates lastLoginAt on successful login", async () => {
+      const mockUser = {
+        id: "user-123",
+        email: "john@example.com",
+        isActive: true,
+      };
+
+      mockPrisma.user.update.mockResolvedValue(mockUser);
+
+      await mockPrisma.user.update({
+        where: { id: "user-123" },
+        data: { lastLoginAt: expect.any(Date) },
+      });
+
+      expect(mockPrisma.user.update).toHaveBeenCalled();
     });
   });
 
   describe("Session management", () => {
-    it("updates last login timestamp", async () => {
-      mockPrisma.user.update.mockResolvedValue({});
+    it("creates a session token", async () => {
+      const session = {
+        id: "session-123",
+        sessionToken: "token-abc",
+        userId: "user-123",
+        expires: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+      };
 
-      await mockPrisma.user.update({
-        where: { id: "u-1" },
-        data: { lastLoginAt: new Date() },
+      mockPrisma.session.create.mockResolvedValue(session);
+
+      const created = await mockPrisma.session.create({
+        data: {
+          sessionToken: session.sessionToken,
+          userId: session.userId,
+          expires: session.expires,
+        },
       });
 
-      expect(mockPrisma.user.update).toHaveBeenCalled();
+      expect(created.sessionToken).toBe("token-abc");
     });
 
-    it("extends session on activity", async () => {
-      mockPrisma.user.update.mockResolvedValue({});
+    it("deletes session on logout", async () => {
+      mockPrisma.session.delete.mockResolvedValue({});
 
-      await mockPrisma.user.update({
-        where: { id: "u-1" },
-        data: { lastActiveAt: new Date() },
+      await mockPrisma.session.delete({
+        where: { sessionToken: "token-abc" },
       });
 
-      expect(mockPrisma.user.update).toHaveBeenCalled();
+      expect(mockPrisma.session.delete).toHaveBeenCalled();
+    });
+  });
+
+  describe("OAuth integration", () => {
+    it("upserts account for OAuth provider", async () => {
+      const accountData = {
+        userId: "user-123",
+        type: "oauth",
+        provider: "google",
+        providerAccountId: "google-123",
+        access_token: "access-token",
+        refresh_token: "refresh-token",
+      };
+
+      mockPrisma.account.upsert.mockResolvedValue({
+        id: "account-123",
+        ...accountData,
+      });
+
+      const result = await mockPrisma.account.upsert({
+        where: {
+          provider_providerAccountId: {
+            provider: accountData.provider,
+            providerAccountId: accountData.providerAccountId,
+          },
+        },
+        update: {},
+        create: accountData,
+      });
+
+      expect(result.provider).toBe("google");
     });
   });
 });

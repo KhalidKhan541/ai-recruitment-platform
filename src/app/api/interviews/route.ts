@@ -5,16 +5,18 @@ import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const createInterviewSchema = z.object({
-  applicationId: z.string().min(1),
-  candidateId: z.string().min(1),
-  interviewerId: z.string().optional(),
-  type: z.enum(["phone", "video", "onsite", "technical", "panel", "cultural", "executive"]).default("video"),
+  applicationId: z.string().uuid(),
+  candidateId: z.string().uuid(),
+  type: z
+    .enum(["phone", "video", "onsite", "technical", "panel", "cultural", "executive"])
+    .default("video"),
+  title: z.string().min(1).max(200),
+  description: z.string().optional(),
   scheduledAt: z.string().datetime(),
-  duration: z.number().min(15).max(480).default(60),
+  durationMinutes: z.number().min(15).max(480).default(60),
   location: z.string().optional(),
-  meetingLink: z.string().url().optional().or(z.literal("")),
+  meetingUrl: z.string().url().optional().or(z.literal("")),
   notes: z.string().optional(),
-  metadata: z.record(z.any()).optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -30,40 +32,46 @@ export async function GET(request: NextRequest) {
     const status = searchParams.get("status") || undefined;
     const type = searchParams.get("type") || undefined;
     const candidateId = searchParams.get("candidateId") || undefined;
-    const applicationId = searchParams.get("applicationId") || undefined;
-    const interviewerId = searchParams.get("interviewerId") || undefined;
+    const jobId = searchParams.get("jobId") || undefined;
     const upcoming = searchParams.get("upcoming") === "true";
     const sortBy = searchParams.get("sortBy") || "scheduledAt";
-    const sortOrder = searchParams.get("sortOrder") || "asc";
+    const sortOrder = (searchParams.get("sortOrder") || "asc") as "asc" | "desc";
 
     const where: any = {};
 
     if (status) where.status = status;
     if (type) where.type = type;
     if (candidateId) where.candidateId = candidateId;
-    if (applicationId) where.applicationId = applicationId;
-    if (interviewerId) where.interviewerId = interviewerId;
+    if (jobId) where.jobId = jobId;
 
     if (upcoming) {
       where.scheduledAt = { gte: new Date() };
-      where.status = { in: ["scheduled", "rescheduled"] };
+      where.status = { in: ["SCHEDULED", "RESCHEDULED"] };
     }
 
-    if (session.user.role === "recruiter" || session.user.role === "hiring_manager") {
-      where.interviewerId = session.user.id;
+    if (session.user.companyId) {
+      where.job = { companyId: session.user.companyId };
     }
 
     const [interviews, total] = await Promise.all([
       prisma.interview.findMany({
         where,
         include: {
-          candidate: { select: { id: true, name: true, email: true, avatar: true, title: true } },
-          application: {
+          candidate: {
             include: {
-              job: { select: { id: true, title: true, department: true } },
+              user: { select: { id: true, name: true, email: true, avatarUrl: true } },
             },
           },
-          interviewer: { select: { id: true, name: true, email: true, avatar: true } },
+          jobPosting: {
+            select: { id: true, title: true, department: true, companyId: true },
+          },
+          application: {
+            select: { id: true, status: true },
+          },
+          panels: true,
+          scores: true,
+          feedback: true,
+          _count: { select: { scores: true, feedback: true } },
         },
         orderBy: { [sortBy]: sortOrder },
         skip: (page - 1) * limit,
@@ -95,7 +103,7 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const validated = createInterviewSchema.parse(body);
 
-    const application = await prisma.application.findUnique({
+    const application = await prisma.jobApplication.findUnique({
       where: { id: validated.applicationId },
       include: { job: { select: { id: true, title: true } } },
     });
@@ -120,60 +128,32 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const interviewerId = validated.interviewerId || session.user.id;
-
-    const conflicting = await prisma.interview.findFirst({
-      where: {
-        interviewerId,
-        status: { in: ["scheduled", "rescheduled"] },
-        scheduledAt: {
-          gte: new Date(scheduledDate.getTime() - validated.duration * 60000),
-          lte: new Date(scheduledDate.getTime() + validated.duration * 60000),
-        },
-      },
-    });
-
-    if (conflicting) {
-      return NextResponse.json(
-        { error: "Interviewer has a conflicting interview at this time" },
-        { status: 409 }
-      );
-    }
-
     const interview = await prisma.interview.create({
       data: {
+        jobId: application.jobId,
         applicationId: validated.applicationId,
         candidateId: validated.candidateId,
-        interviewerId,
         type: validated.type,
+        title: validated.title,
+        description: validated.description,
         scheduledAt: scheduledDate,
-        duration: validated.duration,
+        durationMinutes: validated.durationMinutes,
         location: validated.location,
-        meetingLink: validated.meetingLink || null,
+        meetingUrl: validated.meetingUrl || null,
         notes: validated.notes,
-        metadata: validated.metadata,
-        status: "scheduled",
+        status: "SCHEDULED",
       },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        application: { include: { job: { select: { id: true, title: true } } } },
-        interviewer: { select: { id: true, name: true, email: true } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
+        jobPosting: { select: { id: true, title: true } },
       },
     });
 
-    await prisma.application.update({
+    await prisma.jobApplication.update({
       where: { id: validated.applicationId },
-      data: { status: validated.type === "phone" ? "phone_interview" : "technical_interview" },
-    });
-
-    await prisma.timelineEvent.create({
-      data: {
-        type: "interview_scheduled",
-        title: `${validated.type} interview scheduled`,
-        description: `Interview with ${candidate.name} on ${scheduledDate.toLocaleDateString()}`,
-        metadata: { interviewId: interview.id, type: validated.type },
-        applicationId: validated.applicationId,
-      },
+      data: { status: "INTERVIEW_SCHEDULED" },
     });
 
     return NextResponse.json({ data: interview }, { status: 201 });

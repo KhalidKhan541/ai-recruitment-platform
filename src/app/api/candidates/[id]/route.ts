@@ -5,71 +5,18 @@ import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const updateCandidateSchema = z.object({
-  name: z.string().min(1).max(200).optional(),
-  phone: z.string().optional(),
-  title: z.string().optional(),
-  location: z.string().optional(),
-  linkedIn: z.string().url().optional().or(z.literal("")),
-  portfolio: z.string().url().optional().or(z.literal("")),
-  skills: z
-    .array(
-      z.object({
-        name: z.string(),
-        level: z.enum(["beginner", "intermediate", "advanced", "expert"]),
-        yearsOfExperience: z.number().optional(),
-        endorsed: z.boolean().optional(),
-      })
-    )
-    .optional(),
-  education: z
-    .array(
-      z.object({
-        institution: z.string(),
-        degree: z.string(),
-        field: z.string(),
-        startDate: z.string(),
-        endDate: z.string().optional(),
-        gpa: z.number().optional(),
-        description: z.string().optional(),
-      })
-    )
-    .optional(),
-  workHistory: z
-    .array(
-      z.object({
-        company: z.string(),
-        title: z.string(),
-        location: z.string().optional(),
-        startDate: z.string(),
-        endDate: z.string().optional(),
-        current: z.boolean(),
-        description: z.string(),
-        achievements: z.array(z.string()),
-      })
-    )
-    .optional(),
-  status: z.string().optional(),
-  talentPoolId: z.string().optional().nullable(),
-  metadata: z.record(z.any()).optional(),
+  headline: z.string().max(200).optional().nullable(),
+  summary: z.string().optional().nullable(),
+  desiredSalary: z.number().optional().nullable(),
+  desiredSalaryCurrency: z.string().optional(),
+  willingToRelocate: z.boolean().optional(),
+  workPreference: z.string().optional().nullable(),
+  expectedExperienceLevel: z.string().optional().nullable(),
+  isAvailable: z.boolean().optional(),
+  linkedInUrl: z.string().url().optional().or(z.literal("")).nullable(),
+  portfolioUrl: z.string().url().optional().or(z.literal("")).nullable(),
+  githubUrl: z.string().url().optional().or(z.literal("")).nullable(),
 });
-
-async function getCandidateWithRelations(id: string) {
-  return prisma.candidate.findUnique({
-    where: { id },
-    include: {
-      talentPool: { select: { id: true, name: true } },
-      applications: {
-        include: {
-          job: { select: { id: true, title: true, department: true, status: true } },
-        },
-        orderBy: { createdAt: "desc" },
-      },
-      interviews: { orderBy: { scheduledAt: "desc" } },
-      assessments: { orderBy: { createdAt: "desc" } },
-      _count: { select: { applications: true, interviews: true, assessments: true } },
-    },
-  });
-}
 
 export async function GET(
   _request: NextRequest,
@@ -81,7 +28,41 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const candidate = await getCandidateWithRelations(params.id);
+    const candidate = await prisma.candidate.findUnique({
+      where: { id: params.id },
+      include: {
+        user: { select: { id: true, name: true, email: true, avatarUrl: true, phone: true, role: true } },
+        company: { select: { id: true, name: true } },
+        skills: true,
+        experiences: { orderBy: { startDate: "desc" } },
+        educations: { orderBy: { startDate: "desc" } },
+        certifications: true,
+        references: true,
+        resumes: { orderBy: { createdAt: "desc" } },
+        applications: {
+          include: {
+            job: { select: { id: true, title: true, department: true, status: true } },
+          },
+          orderBy: { createdAt: "desc" },
+        },
+        interviews: {
+          include: { jobPosting: { select: { id: true, title: true } } },
+          orderBy: { scheduledAt: "desc" },
+        },
+        poolMemberships: {
+          include: { pool: { select: { id: true, name: true } } },
+        },
+        _count: {
+          select: {
+            applications: true,
+            interviews: true,
+            assessmentResults: true,
+            poolMemberships: true,
+          },
+        },
+      },
+    });
+
     if (!candidate) {
       return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
     }
@@ -111,9 +92,17 @@ export async function PUT(
     const body = await request.json();
     const validated = updateCandidateSchema.parse(body);
 
+    const updateData: any = { ...validated };
+    if (validated.linkedInUrl === "") updateData.linkedInUrl = null;
+    if (validated.portfolioUrl === "") updateData.portfolioUrl = null;
+    if (validated.githubUrl === "") updateData.githubUrl = null;
+
     const candidate = await prisma.candidate.update({
       where: { id: params.id },
-      data: validated,
+      data: updateData,
+      include: {
+        user: { select: { id: true, name: true, email: true } },
+      },
     });
 
     return NextResponse.json({ data: candidate });
@@ -139,7 +128,7 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (session.user.role !== "admin") {
+    if (session.user.role !== "ADMIN") {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
@@ -160,6 +149,8 @@ export async function DELETE(
     }
 
     await prisma.candidate.delete({ where: { id: params.id } });
+    await prisma.user.delete({ where: { id: candidate.userId } });
+
     return NextResponse.json({ message: "Candidate deleted" });
   } catch (error) {
     console.error("DELETE /api/candidates/[id] error:", error);

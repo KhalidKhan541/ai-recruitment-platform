@@ -5,51 +5,23 @@ import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const updateOfferSchema = z.object({
-  salary: z
+  status: z.enum(["DRAFT", "PENDING_APPROVAL", "APPROVED", "SENT", "VIEWED", "ACCEPTED", "DECLINED", "EXPIRED", "NEGOTIATING", "WITHDRAWN"]).optional(),
+  negotiationNotes: z.string().optional().nullable(),
+  declinedReason: z.string().optional().nullable(),
+  jobOffer: z
     .object({
-      amount: z.number().min(0),
-      currency: z.string().default("USD"),
-      period: z.enum(["hourly", "daily", "weekly", "monthly", "yearly"]).default("yearly"),
-      bonus: z.number().optional(),
-      equity: z.string().optional(),
+      salary: z.number().min(0).optional(),
+      salaryCurrency: z.string().optional(),
+      salaryFrequency: z.enum(["hourly", "daily", "weekly", "monthly", "yearly"]).optional(),
+      equityPercentage: z.number().min(0).max(100).optional(),
+      signingBonus: z.number().min(0).optional(),
+      relocationBonus: z.number().min(0).optional(),
+      benefits: z.array(z.string()).optional(),
+      terms: z.string().optional(),
+      notes: z.string().optional(),
     })
     .optional(),
-  startDate: z.string().datetime().optional(),
-  expirationDate: z.string().datetime().optional(),
-  terms: z.string().optional(),
-  notes: z.string().optional(),
-  benefits: z.array(z.string()).optional(),
-  signingBonus: z.number().optional(),
-  relocationAssistance: z.number().optional(),
-  ptoDays: z.number().optional(),
 });
-
-async function getOfferWithRelations(id: string) {
-  return prisma.offer.findUnique({
-    where: { id },
-    include: {
-      candidate: {
-        select: {
-          id: true, name: true, email: true, avatar: true,
-          title: true, location: true, phone: true,
-        },
-      },
-      application: {
-        include: {
-          job: {
-            select: {
-              id: true, title: true, department: true, location: true,
-              salary: true, benefits: true,
-              hiringManager: { select: { id: true, name: true, email: true } },
-              recruiter: { select: { id: true, name: true, email: true } },
-            },
-          },
-        },
-      },
-      createdBy: { select: { id: true, name: true, email: true } },
-    },
-  });
-}
 
 export async function GET(
   _request: NextRequest,
@@ -61,7 +33,27 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const offer = await getOfferWithRelations(params.id);
+    const offer = await prisma.offer.findUnique({
+      where: { id: params.id },
+      include: {
+        candidate: {
+          include: {
+            user: { select: { id: true, name: true, email: true, avatarUrl: true, phone: true } },
+          },
+        },
+        jobPosting: {
+          include: {
+            company: { select: { id: true, name: true, logoUrl: true } },
+          },
+        },
+        application: {
+          select: { id: true, status: true },
+        },
+        jobOffer: true,
+        documents: true,
+      },
+    });
+
     if (!offer) {
       return NextResponse.json({ error: "Offer not found" }, { status: 404 });
     }
@@ -88,9 +80,9 @@ export async function PUT(
       return NextResponse.json({ error: "Offer not found" }, { status: 404 });
     }
 
-    if (existing.status === "accepted" || existing.status === "declined" || existing.status === "withdrawn") {
+    if (["ACCEPTED", "DECLINED", "WITHDRAWN", "EXPIRED"].includes(existing.status)) {
       return NextResponse.json(
-        { error: `Cannot update a ${existing.status} offer` },
+        { error: `Cannot update a ${existing.status.toLowerCase()} offer` },
         { status: 400 }
       );
     }
@@ -98,29 +90,46 @@ export async function PUT(
     const body = await request.json();
     const validated = updateOfferSchema.parse(body);
 
-    const updateData: any = { ...validated };
-    if (validated.startDate) updateData.startDate = new Date(validated.startDate);
-    if (validated.expirationDate) updateData.expirationDate = new Date(validated.expirationDate);
+    const updateData: any = {};
+    if (validated.status) updateData.status = validated.status;
+    if (validated.negotiationNotes !== undefined) updateData.negotiationNotes = validated.negotiationNotes;
+    if (validated.declinedReason !== undefined) updateData.declinedReason = validated.declinedReason;
 
-    if (validated.salary || validated.benefits || validated.signingBonus !== undefined) {
-      const currentMetadata = (existing.metadata as any) || {};
-      updateData.metadata = {
-        ...currentMetadata,
-        ...(validated.benefits && { benefits: validated.benefits }),
-        ...(validated.signingBonus !== undefined && { signingBonus: validated.signingBonus }),
-        ...(validated.relocationAssistance !== undefined && { relocationAssistance: validated.relocationAssistance }),
-        ...(validated.ptoDays !== undefined && { ptoDays: validated.ptoDays }),
-      };
+    if (validated.status === "SENT" && existing.status !== "SENT") {
+      updateData.sentAt = new Date();
+    }
+
+    if (validated.status === "VIEWED" && existing.status !== "VIEWED") {
+      updateData.viewedAt = new Date();
+    }
+
+    if (validated.status === "ACCEPTED") {
+      updateData.respondedAt = new Date();
+      updateData.signedAt = new Date();
+    }
+
+    if (validated.status === "DECLINED") {
+      updateData.respondedAt = new Date();
     }
 
     const offer = await prisma.offer.update({
       where: { id: params.id },
       data: updateData,
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
-        application: { include: { job: { select: { id: true, title: true } } } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
+        jobPosting: { select: { id: true, title: true } },
+        jobOffer: true,
       },
     });
+
+    if (validated.jobOffer && existing.jobOfferId) {
+      await prisma.jobOffer.update({
+        where: { id: existing.jobOfferId },
+        data: validated.jobOffer,
+      });
+    }
 
     return NextResponse.json({ data: offer });
   } catch (error) {
@@ -150,29 +159,18 @@ export async function DELETE(
       return NextResponse.json({ error: "Offer not found" }, { status: 404 });
     }
 
-    if (offer.status === "accepted") {
+    if (offer.status === "ACCEPTED") {
       return NextResponse.json(
         { error: "Cannot withdraw an accepted offer" },
         { status: 400 }
       );
     }
 
-    if (offer.status === "sent" || offer.status === "negotiating") {
+    if (offer.status === "SENT" || offer.status === "NEGOTIATING") {
       await prisma.offer.update({
         where: { id: params.id },
-        data: { status: "withdrawn" },
+        data: { status: "WITHDRAWN" },
       });
-
-      await prisma.timelineEvent.create({
-        data: {
-          type: "offer_sent",
-          title: "Offer withdrawn",
-          description: `Offer withdrawn by ${session.user.name || "Recruiter"}`,
-          metadata: { offerId: params.id, withdrawnBy: session.user.id },
-          applicationId: offer.applicationId,
-        },
-      });
-
       return NextResponse.json({ message: "Offer withdrawn" });
     }
 

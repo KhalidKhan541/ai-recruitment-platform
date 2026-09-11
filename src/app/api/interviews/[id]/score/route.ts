@@ -4,21 +4,27 @@ import { z } from "zod";
 import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
-const scoreSchema = z.object({
-  overallScore: z.number().min(1).max(10),
-  technicalScore: z.number().min(1).max(10).optional(),
-  communicationScore: z.number().min(1).max(10).optional(),
-  cultureFitScore: z.number().min(1).max(10).optional(),
-  problemSolvingScore: z.number().min(1).max(10).optional(),
-  leadershipScore: z.number().min(1).max(10).optional(),
-  recommendation: z.enum(["strongly_recommend", "recommend", "neutral", "not_recommend", "strongly_not_recommend"]),
-  strengths: z.array(z.string()).min(1, "At least one strength is required"),
-  concerns: z.array(z.string()).default([]),
-  notes: z.string().min(10, "Please provide detailed feedback"),
-  followUpQuestions: z.array(z.string()).optional(),
-  nextSteps: z.string().optional(),
-  wouldWorkWithAgain: z.boolean().optional(),
-  hireConfidence: z.number().min(1).max(10).optional(),
+const scoreInterviewSchema = z.object({
+  scores: z.array(
+    z.object({
+      questionId: z.string().uuid().optional(),
+      score: z.number().min(1).max(10),
+      comments: z.string().optional(),
+    })
+  ),
+  feedback: z.object({
+    recommendation: z.enum([
+      "strongly_recommend",
+      "recommend",
+      "neutral",
+      "not_recommend",
+      "strongly_not_recommend",
+    ]),
+    strengths: z.array(z.string()).min(1, "At least one strength is required"),
+    weaknesses: z.array(z.string()).default([]),
+    notes: z.string().min(10, "Please provide detailed feedback"),
+    wouldInterviewAgain: z.boolean().optional(),
+  }),
 });
 
 export async function POST(
@@ -34,14 +40,15 @@ export async function POST(
     const interview = await prisma.interview.findUnique({
       where: { id: params.id },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
+        candidate: { select: { id: true, user: { select: { name: true } } } },
+        jobPosting: { select: { id: true, title: true } },
         application: {
           include: {
-            job: { select: { id: true, title: true } },
             _count: { select: { interviews: true } },
           },
         },
-        interviewer: { select: { id: true, name: true, email: true } },
+        panels: true,
+        feedback: { select: { interviewerId: true } },
       },
     });
 
@@ -49,109 +56,103 @@ export async function POST(
       return NextResponse.json({ error: "Interview not found" }, { status: 404 });
     }
 
-    if (interview.interviewerId !== session.user.id && session.user.role !== "admin") {
-      return NextResponse.json({ error: "Only the interviewer can submit scores" }, { status: 403 });
-    }
-
-    if (interview.status === "completed") {
+    if (interview.status === "COMPLETED") {
       return NextResponse.json(
         { error: "Interview feedback has already been submitted" },
         { status: 400 }
       );
     }
 
-    if (interview.status === "cancelled") {
+    if (interview.status === "CANCELLED") {
       return NextResponse.json(
         { error: "Cannot score a cancelled interview" },
         { status: 400 }
       );
     }
 
+    const hasSubmitted = interview.feedback.some(
+      (f) => f.interviewerId === session.user.id
+    );
+    if (hasSubmitted && session.user.role !== "ADMIN") {
+      return NextResponse.json(
+        { error: "You have already submitted feedback for this interview" },
+        { status: 400 }
+      );
+    }
+
     const body = await request.json();
-    const validated = scoreSchema.parse(body);
+    const validated = scoreInterviewSchema.parse(body);
 
-    const scoreBreakdown = {
-      overall: validated.overallScore,
-      technical: validated.technicalScore,
-      communication: validated.communicationScore,
-      cultureFit: validated.cultureFitScore,
-      problemSolving: validated.problemSolvingScore,
-      leadership: validated.leadershipScore,
-      recommendation: validated.recommendation,
-      strengths: validated.strengths,
-      concerns: validated.concerns,
-      followUpQuestions: validated.followUpQuestions,
-      nextSteps: validated.nextSteps,
-      wouldWorkWithAgain: validated.wouldWorkWithAgain,
-      hireConfidence: validated.hireConfidence,
-    };
+    const scoreCreations = validated.scores.map((s) => ({
+      interviewId: params.id,
+      interviewerId: session.user.id,
+      interviewerName: session.user.name || "Unknown",
+      questionId: s.questionId || null,
+      score: s.score,
+      comments: s.comments,
+    }));
 
-    const [updatedInterview] = await prisma.$transaction([
-      prisma.interview.update({
-        where: { id: params.id },
-        data: {
-          status: "completed",
-          score: scoreBreakdown,
-          feedback: validated.notes,
-        },
-        include: {
-          candidate: { select: { id: true, name: true } },
-          application: { include: { job: { select: { id: true, title: true } } } },
-        },
-      }),
-      prisma.timelineEvent.create({
-        data: {
-          type: "feedback_submitted",
-          title: `Interview feedback submitted - ${validated.overallScore}/10`,
-          description: `${validated.recommendation.replace(/_/g, " ")} by ${session.user.name || "Interviewer"}`,
-          metadata: {
-            interviewId: params.id,
-            score: scoreBreakdown,
-            submittedBy: session.user.id,
-          },
-          applicationId: interview.applicationId,
-        },
-      }),
-      prisma.applicationNote.create({
-        data: {
-          content: `[Interview Feedback - ${interview.type}]\n\nScore: ${validated.overallScore}/10\nRecommendation: ${validated.recommendation.replace(/_/g, " ")}\n\nStrengths:\n${validated.strengths.map((s) => `- ${s}`).join("\n")}\n\nConcerns:\n${validated.concerns.map((c) => `- ${c}`).join("\n")}\n\nNotes:\n${validated.notes}`,
-          type: "interview",
-          applicationId: interview.applicationId,
-          authorId: session.user.id,
-        },
-      }),
-    ]);
+    await prisma.interviewScore.createMany({ data: scoreCreations });
 
-    if (interview.application._count.interviews > 1) {
+    await prisma.interviewFeedback.create({
+      data: {
+        interviewId: params.id,
+        interviewerId: session.user.id,
+        interviewerName: session.user.name || "Unknown",
+        recommendation: validated.feedback.recommendation,
+        strengths: validated.feedback.strengths,
+        weaknesses: validated.feedback.weaknesses,
+        notes: validated.feedback.notes,
+        wouldInterviewAgain: validated.feedback.wouldInterviewAgain,
+      },
+    });
+
+    const allScores = await prisma.interviewScore.findMany({
+      where: { interviewId: params.id },
+    });
+
+    const avgScore =
+      allScores.reduce((sum, s) => sum + s.score, 0) / allScores.length;
+
+    if (
+      interview.application &&
+      interview.application._count.interviews > 1
+    ) {
       const allInterviews = await prisma.interview.findMany({
         where: {
-          applicationId: interview.applicationId,
-          status: "completed",
+          applicationId: interview.applicationId!,
+          status: "COMPLETED",
         },
-        select: { score: true },
+        include: { scores: { select: { score: true } } },
       });
 
-      const avgScore =
+      const overallAvg =
         allInterviews.reduce((sum, iv) => {
-          const score = (iv.score as any)?.overall || 0;
-          return sum + score;
+          const ivAvg =
+            iv.scores.reduce((s, sc) => s + sc.score, 0) /
+            (iv.scores.length || 1);
+          return sum + ivAvg;
         }, 0) / allInterviews.length;
 
-      if (validated.recommendation === "strongly_recommend" || avgScore >= 8) {
-        await prisma.application.update({
-          where: { id: interview.applicationId },
-          data: { status: "offer_pending" },
-        });
-      } else if (validated.recommendation === "strongly_not_recommend" || validated.overallScore <= 3) {
-        await prisma.application.update({
-          where: { id: interview.applicationId },
-          data: { status: "rejected" },
+      if (overallAvg >= 7 || validated.feedback.recommendation === "strongly_recommend") {
+        await prisma.jobApplication.update({
+          where: { id: interview.applicationId! },
+          data: { status: "SHORTLISTED" },
         });
       }
     }
 
+    const updated = await prisma.interview.update({
+      where: { id: params.id },
+      data: { status: "COMPLETED", completedAt: new Date() },
+    });
+
     return NextResponse.json({
-      data: updatedInterview,
+      data: {
+        interview: updated,
+        scores: scoreCreations,
+        averageScore: Math.round(avgScore * 10) / 10,
+      },
       message: "Interview feedback submitted successfully",
     });
   } catch (error) {
@@ -163,5 +164,50 @@ export async function POST(
     }
     console.error("POST /api/interviews/[id]/score error:", error);
     return NextResponse.json({ error: "Failed to submit score" }, { status: 500 });
+  }
+}
+
+export async function GET(
+  _request: NextRequest,
+  { params }: { params: { id: string } }
+) {
+  try {
+    const session = await getServerSession(authOptions);
+    if (!session?.user) {
+      return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
+    }
+
+    const interview = await prisma.interview.findUnique({
+      where: { id: params.id },
+      include: {
+        scores: { orderBy: { createdAt: "desc" } },
+        feedback: { orderBy: { createdAt: "desc" } },
+      },
+    });
+
+    if (!interview) {
+      return NextResponse.json({ error: "Interview not found" }, { status: 404 });
+    }
+
+    const avgScore =
+      interview.scores.length > 0
+        ? interview.scores.reduce((sum, s) => sum + s.score, 0) /
+          interview.scores.length
+        : null;
+
+    return NextResponse.json({
+      data: {
+        interviewId: params.id,
+        status: interview.status,
+        scores: interview.scores,
+        feedback: interview.feedback,
+        averageScore: avgScore ? Math.round(avgScore * 10) / 10 : null,
+        totalScores: interview.scores.length,
+        totalFeedback: interview.feedback.length,
+      },
+    });
+  } catch (error) {
+    console.error("GET /api/interviews/[id]/score error:", error);
+    return NextResponse.json({ error: "Failed to fetch scores" }, { status: 500 });
   }
 }

@@ -5,42 +5,11 @@ import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const updateApplicationSchema = z.object({
-  resume: z.string().optional(),
-  coverLetter: z.string().optional(),
-  metadata: z.record(z.any()).optional(),
+  coverLetter: z.string().optional().nullable(),
+  notes: z.string().optional(),
+  rating: z.number().min(0).max(100).optional().nullable(),
+  rejectedReason: z.string().optional().nullable(),
 });
-
-async function getApplicationWithRelations(id: string) {
-  return prisma.application.findUnique({
-    where: { id },
-    include: {
-      candidate: {
-        select: {
-          id: true, name: true, email: true, avatar: true,
-          title: true, location: true, phone: true, skills: true,
-          experience: true, education: true, workHistory: true,
-          aiScore: true, aiSummary: true,
-        },
-      },
-      job: {
-        select: {
-          id: true, title: true, department: true, location: true,
-          type: true, status: true, requiredSkills: true,
-          hiringManager: { select: { id: true, name: true, email: true } },
-          recruiter: { select: { id: true, name: true, email: true } },
-        },
-      },
-      notes: {
-        include: { author: { select: { id: true, name: true, email: true, avatar: true } } },
-        orderBy: { createdAt: "desc" },
-      },
-      timeline: { orderBy: { createdAt: "desc" } },
-      interviews: { orderBy: { scheduledAt: "desc" } },
-      offers: { orderBy: { createdAt: "desc" } },
-      _count: { select: { interviews: true, notes: true } },
-    },
-  });
-}
 
 export async function GET(
   _request: NextRequest,
@@ -52,7 +21,30 @@ export async function GET(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const application = await getApplicationWithRelations(params.id);
+    const application = await prisma.jobApplication.findUnique({
+      where: { id: params.id },
+      include: {
+        candidate: {
+          include: {
+            user: { select: { id: true, name: true, email: true, avatarUrl: true, phone: true } },
+            resumes: { orderBy: { createdAt: "desc" }, take: 1 },
+            skills: true,
+            experiences: true,
+            educations: true,
+          },
+        },
+        job: {
+          include: {
+            company: { select: { id: true, name: true, logoUrl: true } },
+          },
+        },
+        interviews: { orderBy: { scheduledAt: "desc" } },
+        offers: { orderBy: { createdAt: "desc" } },
+        screenings: true,
+        _count: { select: { interviews: true, offers: true } },
+      },
+    });
+
     if (!application) {
       return NextResponse.json({ error: "Application not found" }, { status: 404 });
     }
@@ -74,7 +66,9 @@ export async function PUT(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const existing = await prisma.application.findUnique({ where: { id: params.id } });
+    const existing = await prisma.jobApplication.findUnique({
+      where: { id: params.id },
+    });
     if (!existing) {
       return NextResponse.json({ error: "Application not found" }, { status: 404 });
     }
@@ -82,11 +76,13 @@ export async function PUT(
     const body = await request.json();
     const validated = updateApplicationSchema.parse(body);
 
-    const application = await prisma.application.update({
+    const application = await prisma.jobApplication.update({
       where: { id: params.id },
       data: validated,
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
         job: { select: { id: true, title: true } },
       },
     });
@@ -114,11 +110,11 @@ export async function DELETE(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (session.user.role !== "admin") {
+    if (session.user.role !== "ADMIN") {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
-    const application = await prisma.application.findUnique({
+    const application = await prisma.jobApplication.findUnique({
       where: { id: params.id },
       include: { _count: { select: { interviews: true, offers: true } } },
     });
@@ -134,12 +130,7 @@ export async function DELETE(
       );
     }
 
-    await prisma.application.delete({ where: { id: params.id } });
-
-    await prisma.job.update({
-      where: { id: application.jobId },
-      data: { applicationCount: { decrement: 1 } },
-    });
+    await prisma.jobApplication.delete({ where: { id: params.id } });
 
     return NextResponse.json({ message: "Application deleted" });
   } catch (error) {

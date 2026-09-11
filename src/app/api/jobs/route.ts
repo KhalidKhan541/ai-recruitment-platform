@@ -6,59 +6,27 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const createJobSchema = z.object({
   title: z.string().min(1).max(200),
-  department: z.string().min(1).max(100),
-  team: z.string().optional(),
+  description: z.string().min(50, "Description must be at least 50 characters"),
+  requirements: z.string().optional(),
+  responsibilities: z.string().optional(),
+  department: z.string().max(100).optional(),
   location: z.string().min(1).max(200),
   isRemote: z.boolean().default(false),
-  type: z
+  employmentType: z
     .enum(["full_time", "part_time", "contract", "internship", "temporary", "remote", "freelance"])
     .default("full_time"),
-  experienceLevel: z.enum(["entry", "mid", "senior", "lead", "executive"]).default("mid"),
-  employmentType: z.enum(["permanent", "temporary", "contract", "internship", "apprenticeship"]).default("permanent"),
-  description: z.string().min(50, "Description must be at least 50 characters"),
-  requirements: z.array(z.string()).min(1, "At least one requirement is needed"),
-  responsibilities: z.array(z.string()).min(1, "At least one responsibility is needed"),
-  niceToHaves: z.array(z.string()).default([]),
-  salary: z
-    .object({
-      min: z.number().min(0),
-      max: z.number().min(0),
-      currency: z.string().default("USD"),
-      period: z.enum(["hourly", "daily", "weekly", "monthly", "yearly"]).default("yearly"),
-      isNegotiable: z.boolean().default(false),
-    })
+  experienceLevel: z
+    .enum(["ENTRY", "JUNIOR", "MID", "SENIOR", "LEAD", "EXECUTIVE"])
+    .default("MID"),
+  educationLevel: z
+    .enum(["HIGH_SCHOOL", "ASSOCIATE", "BACHELOR", "MASTER", "DOCTORATE", "NONE"])
     .optional(),
-  benefits: z
-    .object({
-      healthInsurance: z.boolean().default(false),
-      dentalInsurance: z.boolean().default(false),
-      visionInsurance: z.boolean().default(false),
-      retirementPlan: z.boolean().default(false),
-      paidTimeOff: z.number().default(0),
-      remoteWork: z.boolean().default(false),
-      stockOptions: z.boolean().default(false),
-      educationBudget: z.number().nullable().default(null),
-      signingBonus: z.number().nullable().default(null),
-      relocationAssistance: z.boolean().default(false),
-      wellnessStipend: z.number().nullable().default(null),
-      parentalLeave: z.number().nullable().default(null),
-      customBenefits: z.array(z.string()).default([]),
-    })
-    .optional(),
-  requiredSkills: z
-    .array(
-      z.object({
-        skillName: z.string(),
-        minimumLevel: z.enum(["beginner", "intermediate", "advanced", "expert"]).default("intermediate"),
-        isRequired: z.boolean().default(true),
-        yearsExperience: z.number().nullable().optional(),
-      })
-    )
-    .optional(),
+  salaryMin: z.number().min(0).optional(),
+  salaryMax: z.number().min(0).optional(),
+  salaryCurrency: z.string().default("USD"),
+  vacancies: z.number().min(1).default(1),
+  applicationDeadline: z.string().datetime().optional(),
   screeningQuestions: z.array(z.string()).optional(),
-  priority: z.enum(["low", "medium", "high", "urgent"]).default("medium"),
-  headcount: z.number().min(1).default(1),
-  closingDate: z.string().datetime().optional(),
   tags: z.array(z.string()).default([]),
 });
 
@@ -75,39 +43,40 @@ export async function GET(request: NextRequest) {
     const search = searchParams.get("search") || undefined;
     const status = searchParams.get("status") || undefined;
     const department = searchParams.get("department") || undefined;
-    const type = searchParams.get("type") || undefined;
     const location = searchParams.get("location") || undefined;
     const sortBy = searchParams.get("sortBy") || "createdAt";
-    const sortOrder = searchParams.get("sortOrder") || "desc";
+    const sortOrder = (searchParams.get("sortOrder") || "desc") as "asc" | "desc";
 
     const where: any = {};
+
+    if (session.user.companyId) {
+      where.companyId = session.user.companyId;
+    }
 
     if (search) {
       where.OR = [
         { title: { contains: search, mode: "insensitive" } },
-        { department: { contains: search, mode: "insensitive" } },
         { description: { contains: search, mode: "insensitive" } },
+        { department: { contains: search, mode: "insensitive" } },
       ];
     }
 
     if (status) where.status = status;
     if (department) where.department = { contains: department, mode: "insensitive" };
-    if (type) where.type = type;
     if (location) where.location = { contains: location, mode: "insensitive" };
 
     const [jobs, total] = await Promise.all([
-      prisma.job.findMany({
+      prisma.jobPosting.findMany({
         where,
         include: {
-          hiringManager: { select: { id: true, name: true, email: true, avatar: true } },
-          recruiter: { select: { id: true, name: true, email: true, avatar: true } },
+          company: { select: { id: true, name: true, logoUrl: true } },
           _count: { select: { applications: true, interviews: true } },
         },
         orderBy: { [sortBy]: sortOrder },
         skip: (page - 1) * limit,
         take: limit,
       }),
-      prisma.job.count({ where }),
+      prisma.jobPosting.count({ where }),
     ]);
 
     return NextResponse.json({
@@ -130,24 +99,47 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    if (!["admin", "recruiter", "hiring_manager"].includes(session.user.role)) {
+    if (!["ADMIN", "RECRUITER", "HIRING_MANAGER"].includes(session.user.role)) {
       return NextResponse.json({ error: "Insufficient permissions" }, { status: 403 });
     }
 
     const body = await request.json();
     const validated = createJobSchema.parse(body);
 
-    const job = await prisma.job.create({
+    const slug = validated.title
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/(^-|-$)/g, "") +
+      "-" +
+      Date.now().toString(36);
+
+    const job = await prisma.jobPosting.create({
       data: {
-        ...validated,
-        hiringManagerId: session.user.id,
-        recruiterId: session.user.id,
-        companyId: session.user.companyId,
-        closingDate: validated.closingDate ? new Date(validated.closingDate) : null,
+        title: validated.title,
+        slug,
+        description: validated.description,
+        requirements: validated.requirements,
+        responsibilities: validated.responsibilities,
+        department: validated.department,
+        location: validated.location,
+        isRemote: validated.isRemote,
+        employmentType: validated.employmentType,
+        experienceLevel: validated.experienceLevel,
+        educationLevel: validated.educationLevel,
+        salaryMin: validated.salaryMin,
+        salaryMax: validated.salaryMax,
+        salaryCurrency: validated.salaryCurrency,
+        vacancies: validated.vacancies,
+        applicationDeadline: validated.applicationDeadline
+          ? new Date(validated.applicationDeadline)
+          : null,
+        screeningQuestions: validated.screeningQuestions || [],
+        tags: validated.tags,
+        companyId: session.user.companyId!,
+        status: "DRAFT",
       },
       include: {
-        hiringManager: { select: { id: true, name: true, email: true, avatar: true } },
-        recruiter: { select: { id: true, name: true, email: true, avatar: true } },
+        company: { select: { id: true, name: true, logoUrl: true } },
         _count: { select: { applications: true, interviews: true } },
       },
     });

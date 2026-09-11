@@ -5,12 +5,12 @@ import prisma from "@/lib/prisma";
 import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const createApplicationSchema = z.object({
-  candidateId: z.string().min(1),
-  jobId: z.string().min(1),
-  resume: z.string().optional(),
+  candidateId: z.string().uuid(),
+  jobId: z.string().uuid(),
   coverLetter: z.string().optional(),
+  source: z.string().max(100).optional(),
+  referredById: z.string().uuid().optional(),
   screeningAnswers: z.record(z.any()).optional(),
-  metadata: z.record(z.any()).optional(),
 });
 
 export async function GET(request: NextRequest) {
@@ -28,42 +28,43 @@ export async function GET(request: NextRequest) {
     const candidateId = searchParams.get("candidateId") || undefined;
     const search = searchParams.get("search") || undefined;
     const sortBy = searchParams.get("sortBy") || "createdAt";
-    const sortOrder = searchParams.get("sortOrder") || "desc";
+    const sortOrder = (searchParams.get("sortOrder") || "desc") as "asc" | "desc";
 
     const where: any = {};
+
+    if (session.user.companyId) {
+      where.job = { companyId: session.user.companyId };
+    }
 
     if (status) where.status = status;
     if (jobId) where.jobId = jobId;
     if (candidateId) where.candidateId = candidateId;
+
     if (search) {
       where.OR = [
-        { candidate: { name: { contains: search, mode: "insensitive" } } },
-        { candidate: { email: { contains: search, mode: "insensitive" } } },
+        { candidate: { user: { name: { contains: search, mode: "insensitive" } } } },
+        { candidate: { user: { email: { contains: search, mode: "insensitive" } } } },
         { job: { title: { contains: search, mode: "insensitive" } } },
       ];
     }
 
-    if (session.user.role === "recruiter" || session.user.role === "hiring_manager") {
-      where.OR = [
-        { job: { hiringManagerId: session.user.id } },
-        { job: { recruiterId: session.user.id } },
-        ...(where.OR || []),
-      ];
-    }
-
     const [applications, total] = await Promise.all([
-      prisma.application.findMany({
+      prisma.jobApplication.findMany({
         where,
         include: {
-          candidate: { select: { id: true, name: true, email: true, avatar: true, title: true, location: true } },
-          job: { select: { id: true, title: true, department: true, location: true } },
-          _count: { select: { interviews: true, notes: true } },
+          candidate: {
+            include: { user: { select: { id: true, name: true, email: true, avatarUrl: true } } },
+          },
+          job: {
+            select: { id: true, title: true, department: true, location: true, companyId: true },
+          },
+          _count: { select: { interviews: true } },
         },
         orderBy: { [sortBy]: sortOrder },
         skip: (page - 1) * limit,
         take: limit,
       }),
-      prisma.application.count({ where }),
+      prisma.jobApplication.count({ where }),
     ]);
 
     return NextResponse.json({
@@ -96,20 +97,25 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
     }
 
-    const job = await prisma.job.findUnique({ where: { id: validated.jobId } });
+    const job = await prisma.jobPosting.findUnique({
+      where: { id: validated.jobId },
+    });
     if (!job) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-    if (job.status !== "open") {
-      return NextResponse.json({ error: "This job is not accepting applications" }, { status: 400 });
+    if (job.status !== "PUBLISHED") {
+      return NextResponse.json(
+        { error: "This job is not accepting applications" },
+        { status: 400 }
+      );
     }
 
-    const existingApplication = await prisma.application.findUnique({
+    const existingApplication = await prisma.jobApplication.findUnique({
       where: {
-        candidateId_jobId: {
-          candidateId: validated.candidateId,
+        jobId_candidateId: {
           jobId: validated.jobId,
+          candidateId: validated.candidateId,
         },
       },
     });
@@ -121,35 +127,21 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const application = await prisma.application.create({
+    const application = await prisma.jobApplication.create({
       data: {
-        candidateId: validated.candidateId,
         jobId: validated.jobId,
-        resume: validated.resume,
+        candidateId: validated.candidateId,
         coverLetter: validated.coverLetter,
-        metadata: validated.screeningAnswers
-          ? { screeningAnswers: validated.screeningAnswers }
-          : validated.metadata,
-        submittedById: session.user.id,
-        status: "submitted",
+        source: validated.source,
+        referredById: validated.referredById,
+        screeningAnswers: validated.screeningAnswers || {},
+        status: "SUBMITTED",
       },
       include: {
-        candidate: { select: { id: true, name: true, email: true } },
+        candidate: {
+          include: { user: { select: { id: true, name: true, email: true } } },
+        },
         job: { select: { id: true, title: true } },
-      },
-    });
-
-    await prisma.job.update({
-      where: { id: validated.jobId },
-      data: { applicationCount: { increment: 1 } },
-    });
-
-    await prisma.timelineEvent.create({
-      data: {
-        type: "applied",
-        title: "Application submitted",
-        description: `${candidate.name} applied for ${job.title}`,
-        applicationId: application.id,
       },
     });
 

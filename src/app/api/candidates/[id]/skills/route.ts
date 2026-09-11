@@ -6,9 +6,8 @@ import { authOptions } from "@/app/api/auth/[...nextauth]/route";
 
 const skillSchema = z.object({
   name: z.string().min(1).max(100),
-  level: z.enum(["beginner", "intermediate", "advanced", "expert"]).default("intermediate"),
+  level: z.enum(["BEGINNER", "INTERMEDIATE", "ADVANCED", "EXPERT", "MASTER"]).default("INTERMEDIATE"),
   yearsOfExperience: z.number().min(0).max(50).optional(),
-  endorsed: z.boolean().optional(),
 });
 
 const addSkillsSchema = z.object({
@@ -16,10 +15,10 @@ const addSkillsSchema = z.object({
 });
 
 const updateSkillSchema = z.object({
+  id: z.string().uuid().optional(),
   name: z.string().min(1).max(100),
-  level: z.enum(["beginner", "intermediate", "advanced", "expert"]),
+  level: z.enum(["BEGINNER", "INTERMEDIATE", "ADVANCED", "EXPERT", "MASTER"]),
   yearsOfExperience: z.number().min(0).max(50).optional(),
-  endorsed: z.boolean().optional(),
 });
 
 export async function GET(
@@ -34,30 +33,36 @@ export async function GET(
 
     const candidate = await prisma.candidate.findUnique({
       where: { id: params.id },
-      select: { id: true, name: true, skills: true },
+      select: {
+        id: true,
+        user: { select: { name: true } },
+        skills: { orderBy: { name: "asc" } },
+      },
     });
 
     if (!candidate) {
       return NextResponse.json({ error: "Candidate not found" }, { status: 404 });
     }
 
-    const skills = (candidate.skills as any[]) || [];
+    const skills = candidate.skills;
 
     const skillStats = {
       total: skills.length,
       byLevel: {
-        beginner: skills.filter((s) => s.level === "beginner").length,
-        intermediate: skills.filter((s) => s.level === "intermediate").length,
-        advanced: skills.filter((s) => s.level === "advanced").length,
-        expert: skills.filter((s) => s.level === "expert").length,
+        BEGINNER: skills.filter((s) => s.level === "BEGINNER").length,
+        INTERMEDIATE: skills.filter((s) => s.level === "INTERMEDIATE").length,
+        ADVANCED: skills.filter((s) => s.level === "ADVANCED").length,
+        EXPERT: skills.filter((s) => s.level === "EXPERT").length,
+        MASTER: skills.filter((s) => s.level === "MASTER").length,
       },
-      endorsed: skills.filter((s) => s.endorsed).length,
+      verified: skills.filter((s) => s.isVerified).length,
+      totalEndorsements: skills.reduce((sum, s) => sum + s.endorsements, 0),
     };
 
     return NextResponse.json({
       data: {
         candidateId: candidate.id,
-        candidateName: candidate.name,
+        candidateName: candidate.user.name,
         skills,
         stats: skillStats,
       },
@@ -86,32 +91,43 @@ export async function POST(
     const body = await request.json();
     const validated = addSkillsSchema.parse(body);
 
-    const currentSkills = (candidate.skills as any[]) || [];
-    const existingNames = new Set(currentSkills.map((s: any) => s.name.toLowerCase()));
+    const existingSkills = await prisma.candidateSkill.findMany({
+      where: { candidateId: params.id },
+    });
 
-    const newSkills = validated.skills.filter(
+    const existingNames = new Set(
+      existingSkills.map((s) => s.name.toLowerCase())
+    );
+
+    const newSkillsData = validated.skills.filter(
       (s) => !existingNames.has(s.name.toLowerCase())
     );
 
-    if (newSkills.length === 0) {
+    if (newSkillsData.length === 0) {
       return NextResponse.json(
         { error: "All provided skills already exist for this candidate" },
         { status: 400 }
       );
     }
 
-    const updatedSkills = [...currentSkills, ...newSkills];
+    const created = await prisma.candidateSkill.createMany({
+      data: newSkillsData.map((s) => ({
+        candidateId: params.id,
+        name: s.name,
+        level: s.level,
+        yearsOfExperience: s.yearsOfExperience,
+      })),
+    });
 
-    const updated = await prisma.candidate.update({
-      where: { id: params.id },
-      data: { skills: updatedSkills },
-      select: { id: true, skills: true },
+    const allSkills = await prisma.candidateSkill.findMany({
+      where: { candidateId: params.id },
+      orderBy: { name: "asc" },
     });
 
     return NextResponse.json({
-      data: updated.skills,
-      added: newSkills.length,
-      skipped: validated.skills.length - newSkills.length,
+      data: allSkills,
+      added: created.count,
+      skipped: validated.skills.length - created.count,
     });
   } catch (error) {
     if (error instanceof z.ZodError) {
@@ -143,27 +159,48 @@ export async function PUT(
     const body = await request.json();
     const validated = z.array(updateSkillSchema).parse(body);
 
-    const currentSkills = (candidate.skills as any[]) || [];
-    const updatedSkills = currentSkills.map((existing: any) => {
-      const update = validated.find(
-        (s) => s.name.toLowerCase() === existing.name.toLowerCase()
-      );
-      return update ? { ...existing, ...update } : existing;
-    });
+    const updates = await Promise.all(
+      validated.map(async (skill) => {
+        if (skill.id) {
+          return prisma.candidateSkill.update({
+            where: { id: skill.id },
+            data: {
+              name: skill.name,
+              level: skill.level,
+              yearsOfExperience: skill.yearsOfExperience,
+            },
+          });
+        }
 
-    const newSkillsNotInList = validated.filter(
-      (s) => !currentSkills.some((e: any) => e.name.toLowerCase() === s.name.toLowerCase())
+        const existing = await prisma.candidateSkill.findFirst({
+          where: {
+            candidateId: params.id,
+            name: { equals: skill.name, mode: "insensitive" },
+          },
+        });
+
+        if (existing) {
+          return prisma.candidateSkill.update({
+            where: { id: existing.id },
+            data: {
+              level: skill.level,
+              yearsOfExperience: skill.yearsOfExperience,
+            },
+          });
+        }
+
+        return prisma.candidateSkill.create({
+          data: {
+            candidateId: params.id,
+            name: skill.name,
+            level: skill.level,
+            yearsOfExperience: skill.yearsOfExperience,
+          },
+        });
+      })
     );
 
-    const finalSkills = [...updatedSkills, ...newSkillsNotInList];
-
-    const updated = await prisma.candidate.update({
-      where: { id: params.id },
-      data: { skills: finalSkills },
-      select: { id: true, skills: true },
-    });
-
-    return NextResponse.json({ data: updated.skills });
+    return NextResponse.json({ data: updates });
   } catch (error) {
     if (error instanceof z.ZodError) {
       return NextResponse.json(
@@ -192,31 +229,25 @@ export async function DELETE(
     }
 
     const body = await request.json();
-    const { skillNames } = body;
+    const { skillIds } = body;
 
-    if (!Array.isArray(skillNames) || skillNames.length === 0) {
+    if (!Array.isArray(skillIds) || skillIds.length === 0) {
       return NextResponse.json(
-        { error: "skillNames array is required" },
+        { error: "skillIds array is required" },
         { status: 400 }
       );
     }
 
-    const namesToRemove = new Set(skillNames.map((n: string) => n.toLowerCase()));
-    const currentSkills = (candidate.skills as any[]) || [];
-    const updatedSkills = currentSkills.filter(
-      (s: any) => !namesToRemove.has(s.name.toLowerCase())
-    );
-
-    const removed = currentSkills.length - updatedSkills.length;
-
-    await prisma.candidate.update({
-      where: { id: params.id },
-      data: { skills: updatedSkills },
+    const result = await prisma.candidateSkill.deleteMany({
+      where: {
+        id: { in: skillIds },
+        candidateId: params.id,
+      },
     });
 
     return NextResponse.json({
-      message: `Removed ${removed} skill(s)`,
-      removed,
+      message: `Removed ${result.count} skill(s)`,
+      removed: result.count,
     });
   } catch (error) {
     console.error("DELETE /api/candidates/[id]/skills error:", error);

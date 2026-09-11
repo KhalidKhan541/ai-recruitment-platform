@@ -11,14 +11,13 @@ declare module "next-auth" {
       email: string;
       name: string | null;
       role: string;
-      avatar: string | null;
+      avatarUrl: string | null;
       companyId: string | null;
     };
   }
-
   interface User {
     role: string;
-    avatar: string | null;
+    avatarUrl: string | null;
     companyId: string | null;
   }
 }
@@ -27,7 +26,7 @@ declare module "next-auth/jwt" {
   interface JWT {
     id: string;
     role: string;
-    avatar: string | null;
+    avatarUrl: string | null;
     companyId: string | null;
   }
 }
@@ -60,32 +59,43 @@ export const authOptions: NextAuthOptions = {
             id: true,
             email: true,
             name: true,
-            password: true,
+            passwordHash: true,
             role: true,
-            avatar: true,
+            avatarUrl: true,
             companyId: true,
+            isActive: true,
+            emailVerified: true,
           },
         });
 
-        if (!user || !user.password) {
+        if (!user || !user.passwordHash) {
           throw new Error("Invalid email or password");
+        }
+
+        if (!user.isActive) {
+          throw new Error("Account has been deactivated");
         }
 
         const isPasswordValid = await bcrypt.compare(
           credentials.password,
-          user.password
+          user.passwordHash
         );
 
         if (!isPasswordValid) {
           throw new Error("Invalid email or password");
         }
 
+        await prisma.user.update({
+          where: { id: user.id },
+          data: { lastLoginAt: new Date() },
+        });
+
         return {
           id: user.id,
           email: user.email,
           name: user.name,
           role: user.role,
-          avatar: user.avatar,
+          avatarUrl: user.avatarUrl,
           companyId: user.companyId,
         };
       },
@@ -96,13 +106,13 @@ export const authOptions: NextAuthOptions = {
       if (user) {
         token.id = user.id;
         token.role = user.role;
-        token.avatar = user.avatar;
+        token.avatarUrl = user.avatarUrl;
         token.companyId = user.companyId;
       }
 
       if (trigger === "update" && session) {
         token.name = session.user?.name ?? token.name;
-        token.avatar = (session.user as any)?.avatar ?? token.avatar;
+        token.avatarUrl = (session.user as any)?.avatarUrl ?? token.avatarUrl;
       }
 
       return token;
@@ -111,7 +121,7 @@ export const authOptions: NextAuthOptions = {
       if (session.user) {
         session.user.id = token.id;
         session.user.role = token.role;
-        session.user.avatar = token.avatar;
+        session.user.avatarUrl = token.avatarUrl;
         session.user.companyId = token.companyId;
       }
 
@@ -119,7 +129,7 @@ export const authOptions: NextAuthOptions = {
     },
     async signIn({ user }) {
       return true;
-      },
+    },
   },
   secret: process.env.NEXTAUTH_SECRET,
 };

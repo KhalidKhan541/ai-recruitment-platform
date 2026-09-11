@@ -14,9 +14,10 @@ const registerSchema = z.object({
     .min(2, "Name must be at least 2 characters")
     .max(100, "Name must be less than 100 characters")
     .trim(),
-  role: z.enum(["admin", "recruiter", "hiring_manager"]).default("recruiter"),
-  company: z.string().optional(),
-  department: z.string().optional(),
+  role: z
+    .enum(["ADMIN", "RECRUITER", "HIRING_MANAGER", "CANDIDATE"])
+    .default("RECRUITER"),
+  companyName: z.string().optional(),
   phone: z.string().optional(),
 });
 
@@ -36,20 +37,29 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const hashedPassword = await bcrypt.hash(validatedData.password, 12);
+    const passwordHash = await bcrypt.hash(validatedData.password, 12);
 
     let companyId: string | undefined;
 
-    if (validatedData.company) {
+    if (validatedData.companyName) {
       const existingCompany = await prisma.company.findFirst({
-        where: { name: { equals: validatedData.company, mode: "insensitive" } },
+        where: {
+          name: { equals: validatedData.companyName, mode: "insensitive" },
+        },
       });
 
       if (existingCompany) {
         companyId = existingCompany.id;
       } else {
+        const slug = validatedData.companyName
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/(^-|-$)/g, "");
         const newCompany = await prisma.company.create({
-          data: { name: validatedData.company },
+          data: {
+            name: validatedData.companyName,
+            slug,
+          },
         });
         companyId = newCompany.id;
       }
@@ -58,11 +68,10 @@ export async function POST(request: NextRequest) {
     const user = await prisma.user.create({
       data: {
         email: validatedData.email,
-        password: hashedPassword,
+        passwordHash,
         name: validatedData.name,
         role: validatedData.role,
         phone: validatedData.phone,
-        department: validatedData.department,
         companyId,
       },
       select: {
@@ -73,6 +82,27 @@ export async function POST(request: NextRequest) {
         createdAt: true,
       },
     });
+
+    if (validatedData.role === "CANDIDATE") {
+      await prisma.candidate.create({
+        data: {
+          userId: user.id,
+          companyId: companyId || null,
+        },
+      });
+    }
+
+    if (
+      validatedData.role === "RECRUITER" ||
+      validatedData.role === "HIRING_MANAGER"
+    ) {
+      await prisma.recruiter.create({
+        data: {
+          userId: user.id,
+          companyId: companyId || null,
+        },
+      });
+    }
 
     return NextResponse.json(
       {
